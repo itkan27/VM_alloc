@@ -1,0 +1,38 @@
+# Node / Frontend
+node_modules/
+dist/
+.env
+.env.local
+npm-debug.log*
+
+# Java / Maven (Backend)
+target/
+*.jar
+*.war
+*.class
+.mvn/
+mvnw
+mvnw.cmd
+
+# Python (ML Service)
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDEs and OS files
+.idea/
+.vscode/
+*.iml
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+Thumbs.db

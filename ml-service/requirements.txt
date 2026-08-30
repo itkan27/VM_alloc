@@ -1,0 +1,10 @@
+# Core
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+
+# ONNX Runtime (CPU)
+onnxruntime>=1.18.0
+
+# Numpy (required by onnxruntime)
+numpy>=1.26.0
