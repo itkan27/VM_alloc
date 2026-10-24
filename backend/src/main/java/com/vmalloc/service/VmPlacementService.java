@@ -51,8 +51,9 @@ public class VmPlacementService {
         // Step 2: simulate
         SimulationResult result = cloudSimRunner.run(requests, classifications);
 
-        log.info("Simulation done. {} VMs placed on {} hosts.",
-                result.placements().size(), result.hostMetrics().size());
+        log.info("Simulation done. {} VMs on {} hosts ({} failed).",
+                result.placements().size(), result.summary().hostsUsed(),
+                result.summary().failedAllocations());
 
         return result;
     }

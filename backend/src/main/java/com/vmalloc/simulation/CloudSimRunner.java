@@ -1,100 +1,224 @@
 package com.vmalloc.simulation;
 
+import com.vmalloc.config.SimProperties;
 import com.vmalloc.model.*;
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
 import org.cloudsimplus.cloudlets.CloudletSimple;
 import org.cloudsimplus.core.CloudSimPlus;
 import org.cloudsimplus.datacenters.DatacenterSimple;
+import org.cloudsimplus.hosts.Host;
 import org.cloudsimplus.hosts.HostSimple;
+import org.cloudsimplus.power.models.PowerModelHostSimple;
+import org.cloudsimplus.resources.Pe;
 import org.cloudsimplus.resources.PeSimple;
 import org.cloudsimplus.schedulers.cloudlet.CloudletSchedulerTimeShared;
 import org.cloudsimplus.schedulers.vm.VmSchedulerTimeShared;
 import org.cloudsimplus.utilizationmodels.UtilizationModelDynamic;
+import org.cloudsimplus.vms.Vm;
 import org.cloudsimplus.vms.VmSimple;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.function.BooleanSupplier;
 import java.util.stream.IntStream;
 
 /**
  * CloudSimRunner
  * ──────────────
- * Builds a CloudSim Plus environment, submits classified VMs, runs a one-shot
- * batch simulation, and returns structured results.
+ * Builds a zoned CloudSim Plus datacenter, submits classified VMs and runs either
+ *   • a one-shot batch simulation ({@link #run}), or
+ *   • a live simulation paced against the wall clock that reports every placement
+ *     and periodic host snapshots to a {@link SimulationObserver} ({@link #runLive}).
  *
- * Datacenter defaults (overridable via application.properties):
- *   sim.host.count      = 10
- *   sim.host.pes        = 8     (PEs per host)
- *   sim.host.mips       = 3000  (MIPS per PE)
- *   sim.host.ram        = 32768 (MB)
- *   sim.host.bandwidth  = 10000 (Mbps)
- *   sim.host.storage    = 1000000 (MB)
+ * Datacenter layout and policy come from {@link SimProperties} (sim.* keys):
+ *   hosts 0 … performance.count-1  → Performance Zone
+ *   remaining hosts                → Eco Zone
  */
 @Component
 public class CloudSimRunner {
 
     private static final Logger log = LoggerFactory.getLogger(CloudSimRunner.class);
 
-    @Value("${sim.host.count:10}")
-    private int hostCount;
+    /** Simulated seconds advanced per step of a live run */
+    private static final double LIVE_STEP_SECONDS = 1.0;
 
-    @Value("${sim.host.pes:8}")
-    private int hostPes;
+    /** Minimum wall-clock gap between two host-update snapshots of a live run */
+    private static final long HOST_UPDATE_INTERVAL_MS = 250;
 
-    @Value("${sim.host.mips:3000}")
-    private long hostMips;
+    private final SimProperties props;
 
-    @Value("${sim.host.ram:32768}")
-    private long hostRam;
+    public CloudSimRunner(SimProperties props) {
+        this.props = props;
+    }
 
-    @Value("${sim.host.bandwidth:10000}")
-    private long hostBandwidth;
+    /** Live-run pacing: simulated seconds per wall second, and simulated seconds between VM arrivals */
+    public record LiveOptions(double timeScale, double arrivalGapSeconds) {}
 
-    @Value("${sim.host.storage:1000000}")
-    private long hostStorage;
+    /** Everything one simulation run needs, built by {@link #prepare} */
+    private record SimRun(
+            CloudSimPlus simulation,
+            TrackedAllocationPolicy policy,
+            List<Host> hosts,
+            EnergyAccountant energy,
+            List<VmRequest> requests,
+            List<ClassificationResult> classifications,
+            List<VmSimple> vms,
+            List<CloudletSimple> cloudlets,
+            List<VmProfile> profiles
+    ) {}
 
     /**
-     * Runs the simulation synchronously.
+     * Runs a batch simulation synchronously: all VMs arrive at time 0.
      *
      * @param requests        ordered list of VM placement requests
      * @param classifications map from vmId → ClassificationResult
      * @return complete simulation result ready for the frontend
      */
-    public synchronized SimulationResult run(
+    public SimulationResult run(
             List<VmRequest> requests,
             Map<String, ClassificationResult> classifications) {
 
-        log.info("Starting CloudSim Plus simulation with {} VMs on {} hosts.",
-                requests.size(), hostCount);
+        SimRun run = prepare(requests, classifications, 0.0);
+        run.simulation().start();
+        log.info("Simulation finished. Clock: {} seconds.", run.simulation().clock());
+        return buildResult(run);
+    }
+
+    /**
+     * Runs a live simulation on the calling thread. VMs arrive {@code arrivalGapSeconds}
+     * apart and simulated time advances at {@code timeScale} × wall-clock speed.
+     *
+     * @param stopRequested polled every step; returning true ends the run early
+     * @return the result at the moment the run finished or was stopped
+     */
+    public SimulationResult runLive(
+            List<VmRequest> requests,
+            Map<String, ClassificationResult> classifications,
+            LiveOptions options,
+            SimulationObserver observer,
+            BooleanSupplier stopRequested) {
+
+        SimRun run = prepare(requests, classifications, options.arrivalGapSeconds());
+        CloudSimPlus simulation = run.simulation();
+
+        Map<Vm, Integer> indexOf = new IdentityHashMap<>();
+        for (int i = 0; i < run.vms().size(); i++) indexOf.put(run.vms().get(i), i);
+
+        run.policy().setPlacementListener((vm, profile, placement) -> {
+            ClassificationResult cls = run.classifications().get(indexOf.get(vm));
+            Host host = placement.host();
+            observer.onPlacement(new PlacementEvent(
+                    profile.vmId(), vm.getId(), cls.vmType(), cls.confidence(),
+                    host.getId(), "Host-" + host.getId(), placement.zone(), placement.reason(),
+                    profile.avgDemandMips(), profile.peakDemandMips(), true,
+                    snapshot(run, host), simulation.clock()));
+        });
+
+        // CloudSim reports a failure on every broker retry; stream only the first one
+        Set<Vm> reportedFailures = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (VmSimple vm : run.vms()) {
+            vm.addOnCreationFailureListener(info -> {
+                if (!reportedFailures.add(vm)) return;
+                int i = indexOf.get(vm);
+                VmProfile p = run.profiles().get(i);
+                ClassificationResult cls = run.classifications().get(i);
+                observer.onPlacementFailed(new PlacementFailedEvent(
+                        p.vmId(), vm.getId(), cls.vmType(), cls.confidence(),
+                        p.avgDemandMips(), p.peakDemandMips(), simulation.clock()));
+            });
+        }
+
+        observer.onInit(snapshots(run));
+
+        long wallMsPerStep = Math.round(1000.0 * LIVE_STEP_SECONDS / options.timeScale());
+        long lastUpdate = 0;
+
+        simulation.startSync();
+        while (simulation.isRunning()) {
+            if (stopRequested.getAsBoolean()) {
+                simulation.terminate();
+                break;
+            }
+            simulation.runFor(LIVE_STEP_SECONDS);
+
+            long now = System.currentTimeMillis();
+            if (now - lastUpdate >= HOST_UPDATE_INTERVAL_MS) {
+                observer.onHostUpdate(new HostUpdateEvent(simulation.clock(), snapshots(run)));
+                lastUpdate = now;
+            }
+            if (!sleep(wallMsPerStep)) {
+                simulation.terminate();
+                break;
+            }
+        }
+        observer.onHostUpdate(new HostUpdateEvent(simulation.clock(), snapshots(run)));
+        log.info("Live simulation finished. Clock: {} seconds.", simulation.clock());
+
+        return buildResult(run);
+    }
+
+    // ── Setup ────────────────────────────────────────────────────────────────
+
+    private SimRun prepare(
+            List<VmRequest> requests,
+            Map<String, ClassificationResult> classifications,
+            double arrivalGapSeconds) {
+
+        log.info("Starting CloudSim Plus simulation: {} VMs, {} hosts ({} performance), policy={}.",
+                requests.size(), props.getHost().getCount(),
+                props.getHost().performanceCount(), props.getPolicy());
 
         // ── 1. Bootstrap simulation ──────────────────────────────────────────
         var simulation = new CloudSimPlus();
 
         // ── 2. Build allocation policy & datacenter ──────────────────────────
-        var policy = new CustomVmAllocationPolicy();
-        var datacenter = new DatacenterSimple(simulation, buildHosts(), policy);
+        TrackedAllocationPolicy policy = createPolicy();
+        List<Host> hosts = buildHosts(policy);
+        var datacenter = new DatacenterSimple(simulation, hosts, policy);
         datacenter.setSchedulingInterval(1);
 
+        var energy = new EnergyAccountant(hosts, policy.getLedger(), props.getHost().getIdlePolicy());
+        energy.attach(simulation);
+
         // ── 3. Broker ────────────────────────────────────────────────────────
+        // Destroy each VM 1 s after its cloudlet finishes, so its host capacity
+        // (and power draw) is released at the right time instead of at the end
         var broker = new DatacenterBrokerSimple(simulation);
+        broker.setVmDestructionDelay(1.0);
 
         // ── 4. Create CloudSim VMs & cloudlets ───────────────────────────────
+        // Every CloudSim VM is sized to the average demand the policy budgets, split
+        // into PEs small enough for any host's PE grid. CloudSim's reservation then
+        // never exceeds what the policy checked, and CloudSim's host utilisation
+        // equals the reported avg-demand utilisation. MIPS per PE is rounded down to
+        // a whole number because CloudSim truncates VM MIPS, and a cloudlet sized
+        // from fractional MIPS never completes.
+        double minPeMips = hosts.stream()
+                .flatMap(h -> h.getPeList().stream())
+                .mapToDouble(Pe::getCapacity)
+                .min().orElse(1.0);
+        int minHostPes = hosts.stream()
+                .mapToInt(h -> h.getPeList().size())
+                .min().orElse(1);
+
+        List<ClassificationResult> classList = new ArrayList<>();
         List<VmSimple> vms = new ArrayList<>();
         List<CloudletSimple> cloudlets = new ArrayList<>();
+        List<VmProfile> profiles = new ArrayList<>();
+        double lastEventTime = 0;
 
         for (int i = 0; i < requests.size(); i++) {
             VmRequest req = requests.get(i);
-            ClassificationResult cls = classifications.get(req.vmId());
+            ClassificationResult cls = classificationOf(req, classifications);
+            VmProfile profile = VmProfile.of(req, cls.vmType());
 
-            // ── Create VM in CloudSim ───────────────────────────────────────
-            // We request only 1 PE in CloudSim to bypass its internal PE-count
-            // check. CloudSim's VmScheduler blocks VMs when total provisioned
-            // PEs exceed host PEs, but we manage CPU budgeting ourselves using
-            // avg-utilization demand (avgCpu × mips × cores) in our policy.
-            VmSimple vm = new VmSimple(req.mips(), 1);  // 1 PE for CloudSim
+            double demand = Math.max(profile.avgDemandMips(), 1.0);
+            int vmPes = (int) Math.min(minHostPes, Math.max(1, Math.ceil(demand / minPeMips)));
+            long mipsPerPe = Math.max(1L, (long) Math.floor(demand / vmPes));
+
+            VmSimple vm = new VmSimple(mipsPerPe, vmPes);
             vm.setRam(req.ram())
               .setBw(req.bandwidth())
               .setSize(10_000)
@@ -102,167 +226,215 @@ public class CloudSimRunner {
 
             // Tag the VM description with the user-supplied ID for traceability
             vm.setDescription(req.vmId());
+            policy.register(vm, profile);
 
-            vms.add(vm);
+            double arrival = i * arrivalGapSeconds;
+            if (arrival > 0) vm.setSubmissionDelay(arrival);
+            lastEventTime = Math.max(lastEventTime, arrival + req.duration());
 
-            // Register spiky VMs in the allocation policy (by object reference)
-            if (cls != null && cls.vmType() == VmType.SPIKY) {
-                policy.addSpikyVm(vm);
-            }
-
-            // Register expected CPU demand = MIPS × cores × (avgCpu / 100)
-            // This is the REAL demand used for placement — our policy enforces:
-            //   Σ(vm_demand) on a host ≤ host_capacity (pes × mips)
-            double cpuDemandMips = req.mips() * req.numCores() * (req.avgCpu() / 100.0);
-            policy.setVmCpuDemand(vm, cpuDemandMips);
-
-            // ── Create Cloudlet ─────────────────────────────────────────────
-            // 1 PE, full utilization, length = mips × duration
-            // Execution time = length / (mips × 1.0) = duration seconds
-            long cloudletLength = req.mips() * req.duration();
-            var cloudlet = new CloudletSimple(cloudletLength, 1);  // 1 PE
+            // Cloudlet uses the VM's full capacity: runtime = length / mipsPerPe = duration
+            long cloudletLength = mipsPerPe * req.duration();
+            var cloudlet = new CloudletSimple(cloudletLength, vmPes);
             cloudlet.setUtilizationModelCpu(new UtilizationModelDynamic(1.0))
                     .setUtilizationModelRam(new UtilizationModelDynamic(0.01))
                     .setUtilizationModelBw(new UtilizationModelDynamic(0.01))
                     .setVm(vm);
 
+            classList.add(cls);
+            vms.add(vm);
             cloudlets.add(cloudlet);
+            profiles.add(profile);
         }
+
+        // Safety guard: end a run that stalls well past its last expected event
+        // instead of blocking the calling thread forever
+        double guardTime = 2 * lastEventTime + 60;
+        simulation.addOnClockTickListener(info -> {
+            if (info.getTime() > guardTime && simulation.isRunning()) {
+                log.warn("Simulation passed {} s without finishing; terminating.", guardTime);
+                simulation.terminate();
+            }
+        });
 
         broker.submitVmList(vms);
         broker.submitCloudletList(cloudlets);
 
-        // ── 5. Run ───────────────────────────────────────────────────────────
-        simulation.start();
-        log.info("Simulation finished. Clock: {} seconds.", simulation.clock());
-
-        // ── 6. Collect results ───────────────────────────────────────────────
-        return buildResult(requests, classifications, vms, datacenter, simulation.clock());
+        return new SimRun(simulation, policy, hosts, energy,
+                requests, classList, vms, cloudlets, profiles);
     }
 
-    // ── Private helpers ──────────────────────────────────────────────────────
+    private TrackedAllocationPolicy createPolicy() {
+        return switch (props.getPolicy()) {
+            case ZONED -> new ZonedVmAllocationPolicy(props.getZone());
+            case MIDSEM -> new MidsemVmAllocationPolicy();
+        };
+    }
 
-    private List<HostSimple> buildHosts() {
-        List<HostSimple> hosts = new ArrayList<>();
-        for (int i = 0; i < hostCount; i++) {
-            List<org.cloudsimplus.resources.Pe> pes = IntStream.range(0, hostPes)
-                    .mapToObj(j -> (org.cloudsimplus.resources.Pe) new PeSimple(hostMips))
+    private List<Host> buildHosts(TrackedAllocationPolicy policy) {
+        SimProperties.Hosts cfg = props.getHost();
+        int perfCount = cfg.performanceCount();
+
+        List<Host> hosts = new ArrayList<>();
+        for (int i = 0; i < cfg.getCount(); i++) {
+            boolean perf = i < perfCount;
+            SimProperties.HostClass spec = perf ? cfg.getPerformance() : cfg.getEco();
+
+            List<Pe> pes = IntStream.range(0, spec.getPes())
+                    .mapToObj(j -> (Pe) new PeSimple(spec.getMips()))
                     .toList();
-            var host = new HostSimple(hostRam, hostBandwidth, hostStorage, pes);
+            var host = new HostSimple(spec.getRam(), cfg.getBandwidth(), cfg.getStorage(), pes);
             host.setVmScheduler(new VmSchedulerTimeShared());
+            host.setPowerModel(new PowerModelHostSimple(
+                    spec.getPowerModel().getMaxWatts(), spec.getPowerModel().getIdleWatts()));
+
+            policy.setZone(host, perf ? Zone.PERFORMANCE : Zone.ECO);
             hosts.add(host);
         }
         return hosts;
     }
 
-    private SimulationResult buildResult(
-            List<VmRequest> requests,
-            Map<String, ClassificationResult> classifications,
-            List<VmSimple> vms,
-            DatacenterSimple datacenter,
-            double simClock) {
+    private static ClassificationResult classificationOf(
+            VmRequest req, Map<String, ClassificationResult> classifications) {
+        return classifications.getOrDefault(req.vmId(),
+                new ClassificationResult(req.vmId(), VmType.STABLE, 0.5));
+    }
+
+    private static boolean sleep(long millis) {
+        if (millis <= 0) return true;
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    // ── Live snapshots (from the ledger: VMs currently running) ──────────────
+
+    private static List<HostSnapshot> snapshots(SimRun run) {
+        return run.hosts().stream().map(h -> snapshot(run, h)).toList();
+    }
+
+    private static HostSnapshot snapshot(SimRun run, Host host) {
+        HostLedger ledger = run.policy().getLedger();
+        int vms = ledger.vms(host);
+        int spiky = ledger.spikyVms(host);
+        return new HostSnapshot(
+                host.getId(),
+                "Host-" + host.getId(),
+                run.policy().zoneOf(host),
+                vms > 0,
+                host.getTotalMipsCapacity(),
+                ledger.cpuUtilization(host),
+                ledger.guaranteedMips(host),
+                vms,
+                spiky,
+                vms - spiky);
+    }
+
+    // ── Results ──────────────────────────────────────────────────────────────
+
+    private SimulationResult buildResult(SimRun run) {
+        List<VmRequest> requests = run.requests();
+        List<VmSimple> vms = run.vms();
+        List<CloudletSimple> cloudlets = run.cloudlets();
+        List<VmProfile> profiles = run.profiles();
+        TrackedAllocationPolicy policy = run.policy();
 
         // ── Per-VM placement results ─────────────────────────────────────────
         List<VmPlacementResult> placements = new ArrayList<>();
+        Map<Host, List<Integer>> hostToVmIndexes = new IdentityHashMap<>();
+
         for (int i = 0; i < requests.size(); i++) {
             VmRequest req = requests.get(i);
             VmSimple vm = vms.get(i);
-            ClassificationResult cls = classifications.getOrDefault(req.vmId(),
-                    new ClassificationResult(req.vmId(), VmType.STABLE, 0.5));
+            VmProfile profile = profiles.get(i);
+            ClassificationResult cls = run.classifications().get(i);
+            Optional<TrackedAllocationPolicy.Placement> placement = policy.placementOf(vm);
 
-            boolean placed = !vm.getHost().equals(org.cloudsimplus.hosts.Host.NULL);
-            long hostId = placed ? vm.getHost().getId() : -1L;
-            String hostName = placed ? "Host-" + hostId : "Unallocated";
+            boolean placed = placement.isPresent() && vm.getHost() != Host.NULL;
+            if (placed) {
+                hostToVmIndexes.computeIfAbsent(vm.getHost(), k -> new ArrayList<>()).add(i);
+            }
 
             placements.add(new VmPlacementResult(
                     req.vmId(),
                     vm.getId(),
                     cls.vmType(),
                     cls.confidence(),
-                    hostId,
-                    hostName,
+                    placed ? vm.getHost().getId() : -1L,
+                    placed ? "Host-" + vm.getHost().getId() : "Unallocated",
+                    placement.map(TrackedAllocationPolicy.Placement::zone).orElse(null),
+                    placement.map(TrackedAllocationPolicy.Placement::reason).orElse(null),
+                    profile.avgDemandMips(),
+                    profile.peakDemandMips(),
                     placed
             ));
         }
 
-        // ── Per-host metrics ─────────────────────────────────────────────────
+        // ── Per-host metrics (all hosts, in host order) ──────────────────────
         List<HostMetric> hostMetrics = new ArrayList<>();
-        Set<Long> spikyVmIds = new HashSet<>();
-        classifications.values().stream()
-                .filter(c -> c.vmType() == VmType.SPIKY)
-                .forEach(c -> {
-                    vms.stream()
-                       .filter(v -> v.getDescription().equals(c.vmId()))
-                       .findFirst()
-                       .ifPresent(v -> spikyVmIds.add(v.getId()));
-                });
+        for (Host host : run.hosts()) {
+            List<Integer> idx = hostToVmIndexes.getOrDefault(host, List.of());
 
-        // Group VMs by their assigned host (since host.getVmList() is empty after destruction)
-        Map<org.cloudsimplus.hosts.Host, List<VmSimple>> hostToVms = new HashMap<>();
-        for (VmSimple vm : vms) {
-            org.cloudsimplus.hosts.Host h = vm.getHost();
-            if (h != null && h != org.cloudsimplus.hosts.Host.NULL) {
-                hostToVms.computeIfAbsent(h, k -> new ArrayList<>()).add(vm);
-            }
-        }
+            double avgDemand = 0, peakDemand = 0;
+            int spiky = 0;
+            double firstStart = Double.MAX_VALUE, lastFinish = 0;
+            for (int i : idx) {
+                VmProfile p = profiles.get(i);
+                avgDemand += p.avgDemandMips();
+                peakDemand += p.guaranteedMips();
+                if (p.isSpiky()) spiky++;
 
-        for (var entry : hostToVms.entrySet()) {
-            org.cloudsimplus.hosts.Host host = entry.getKey();
-            List<VmSimple> hostedVms = entry.getValue();
-
-            long spiky = hostedVms.stream()
-                    .filter(v -> spikyVmIds.contains(v.getId()))
-                    .count();
-            long stable = hostedVms.size() - spiky;
-
-            // Calculate expected average CPU utilization based on VM configs
-            double totalVmCpuDemand = 0;
-            double maxVmDuration = 0;
-            for (VmSimple vm : hostedVms) {
-                // retrieve the avgCpu from the original request
-                VmRequest req = requests.stream()
-                        .filter(r -> r.vmId().equals(vm.getDescription()))
-                        .findFirst().orElse(null);
-                
-                if (req != null) {
-                    // MIPS * cores * (avgCpu / 100)
-                    totalVmCpuDemand += (req.mips() * req.numCores() * (req.avgCpu() / 100.0));
-                    maxVmDuration = Math.max(maxVmDuration, req.duration());
+                CloudletSimple cl = cloudlets.get(i);
+                if (cl.isFinished()) {
+                    firstStart = Math.min(firstStart, cl.getExecStartTime());
+                    lastFinish = Math.max(lastFinish, cl.getFinishTime());
                 }
             }
-            double hostTotalMips = host.getTotalMipsCapacity();
-            double avgCpuUtil = Math.min(totalVmCpuDemand / hostTotalMips, 1.0);
 
+            double capacity = host.getTotalMipsCapacity();
             hostMetrics.add(new HostMetric(
                     host.getId(),
                     "Host-" + host.getId(),
-                    avgCpuUtil,
-                    hostedVms.size(),
-                    (int) spiky,
-                    (int) stable,
-                    maxVmDuration
+                    policy.zoneOf(host),
+                    !idx.isEmpty(),
+                    capacity,
+                    Math.min(avgDemand / capacity, 1.0),
+                    peakDemand,
+                    idx.size(),
+                    spiky,
+                    idx.size() - spiky,
+                    lastFinish > 0 ? lastFinish - firstStart : 0.0,
+                    run.energy().energyKWh(host)
             ));
         }
 
         // ── Summary ──────────────────────────────────────────────────────────
-        long spikyTotal = classifications.values().stream()
-                .filter(c -> c.vmType() == VmType.SPIKY).count();
-        long failed = placements.stream().filter(p -> !p.allocationSuccess()).count();
-        double avgUtil = hostMetrics.stream()
-                .mapToDouble(HostMetric::cpuUtilization)
-                .average().orElse(0.0);
-        double avgHostDuration = hostMetrics.stream()
-                .mapToDouble(HostMetric::hostDurationSeconds)
-                .average().orElse(0.0);
+        List<HostMetric> active = hostMetrics.stream().filter(HostMetric::active).toList();
+        int spikyTotal = (int) profiles.stream().filter(VmProfile::isSpiky).count();
+        int failed = (int) placements.stream().filter(p -> !p.allocationSuccess()).count();
+        int overflow = (int) placements.stream()
+                .filter(p -> ZonedVmAllocationPolicy.SPIKY_OVERFLOW_ECO.equals(p.placementReason()))
+                .count();
+        int peakOverload = (int) active.stream()
+                .filter(h -> h.peakDemandMips() > h.capacityMips() + 1e-9)
+                .count();
 
         SimulationSummary summary = new SimulationSummary(
                 requests.size(),
-                (int) spikyTotal,
-                (int) (requests.size() - spikyTotal),
-                hostMetrics.size(),
-                (int) failed,
-                avgUtil,
-                avgHostDuration
+                spikyTotal,
+                requests.size() - spikyTotal,
+                active.size(),
+                (int) active.stream().filter(h -> h.zone() == Zone.PERFORMANCE).count(),
+                (int) active.stream().filter(h -> h.zone() == Zone.ECO).count(),
+                failed,
+                overflow,
+                peakOverload,
+                active.stream().mapToDouble(HostMetric::cpuUtilization).average().orElse(0.0),
+                active.stream().mapToDouble(HostMetric::activeSeconds).average().orElse(0.0),
+                run.energy().totalEnergyKWh()
         );
 
         return new SimulationResult(placements, hostMetrics, summary);

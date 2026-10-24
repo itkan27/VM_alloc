@@ -22,6 +22,18 @@ public record VmPlacementResult(
         /** Human-readable host label */
         String hostName,
 
+        /** Zone of the host the VM was placed on (null if allocation failed) */
+        Zone zone,
+
+        /** Allocation rule that chose the host, e.g. PERF_FIRST_FIT (null if allocation failed) */
+        String placementReason,
+
+        /** avgCpu% × mips × cores */
+        double cpuDemandMips,
+
+        /** maxCpu% × mips × cores */
+        double peakDemandMips,
+
         /** Whether CloudSim Plus successfully allocated the VM */
         boolean allocationSuccess
 ) {}

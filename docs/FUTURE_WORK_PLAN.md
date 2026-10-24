@@ -7,6 +7,23 @@
 > edge cases (results in §1.2). CloudSim Plus 8.0.0 APIs named below were checked
 > against the actual jar.
 
+## Status (updated)
+
+| Phase | Status |
+|---|---|
+| 0 — Groundwork | ✅ Done. VM sizing fix, confirmed-only ledger booking/release, policy base class, all hosts in host order, measured host time in seconds |
+| 1 — Performance & Eco zones | ✅ Done. Zoned policy with peak-safe admission and overflow rules, power models on all hosts, energy card, zone colours, Zone column |
+| 2 — Real-time dashboard | ✅ Done. Live sessions on a background executor, SSE stream with replay (`Last-Event-ID`), Instant / Live modes, animated rows |
+| 3 — Live placement & migration | ⏳ Next |
+| 4 — Comparison with base paper | ⏳ Next |
+| Testing & validation | Deferred to the end. The slow randomized suite is tagged `validation` and excluded from `mvn test` |
+
+Notes from implementation:
+* CloudSim truncates VM MIPS to whole numbers; a cloudlet sized from fractional MIPS never completes. VM MIPS per PE is now rounded down.
+* Finished VMs are destroyed 1 s after their cloudlet ends (`setVmDestructionDelay`), so capacity and power are released on time.
+* A stall guard terminates any run that passes `2 × last expected event + 60 s`. One random validation batch still runs far longer than expected; investigate during the testing phase.
+* The plan's `/api/simulate/*` paths were implemented as `/api/simulation/sessions/*` (§2).
+
 ---
 
 ## 0. TL;DR

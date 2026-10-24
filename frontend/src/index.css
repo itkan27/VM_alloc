@@ -437,3 +437,52 @@ tbody td {
 .text-muted { color: var(--text-muted); font-size: 0.8rem; }
 .mono { font-family: 'Courier New', monospace; font-size: 0.8rem; }
 .w-full { width: 100%; }
+
+/* ── Zones ──────────────────────────────────────────────────── */
+.badge-perf {
+  background: rgba(249,115,22,0.15);
+  color: #f97316;
+  border: 1px solid rgba(249,115,22,0.3);
+}
+
+.badge-eco {
+  background: rgba(34,197,94,0.12);
+  color: #22c55e;
+  border: 1px solid rgba(34,197,94,0.3);
+}
+
+/* Metric cards: as many columns as fit */
+.section-grid.cols-auto { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+/* ── Live mode ──────────────────────────────────────────────── */
+.mode-toggle {
+  display: inline-flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+
+.mode-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  border-radius: calc(var(--radius-sm) - 2px);
+  cursor: pointer;
+}
+
+.mode-toggle button.active {
+  background: var(--accent-primary);
+  color: #fff;
+}
+
+@keyframes rowIn {
+  from { opacity: 0; transform: translateY(-6px); background: rgba(129,140,248,0.18); }
+  to   { opacity: 1; transform: none; background: transparent; }
+}
+
+.row-new { animation: rowIn 0.5s ease-out; }

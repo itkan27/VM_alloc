@@ -20,10 +20,14 @@ function generateId() {
 
 /**
  * VMSubmissionForm
- * Lets the user build a list of VMs and submit them for simulation.
+ * Lets the user build a list of VMs and submit them for simulation, either as an
+ * instant batch or as a live run streamed to the dashboard.
  */
 export default function VMSubmissionForm({ onSubmit, loading }) {
   const [vms, setVms] = useState([{ ...DEFAULT_VM, vmId: generateId() }]);
+  const [mode, setMode] = useState('batch'); // batch | live
+  const [timeScale, setTimeScale] = useState(120);
+  const [arrivalGapSeconds, setArrivalGapSeconds] = useState(30);
 
   function addVm() {
     setVms((prev) => [...prev, { ...DEFAULT_VM, vmId: generateId() }]);
@@ -43,7 +47,7 @@ export default function VMSubmissionForm({ onSubmit, loading }) {
 
   function handleSubmit(e) {
     e.preventDefault();
-    onSubmit(vms);
+    onSubmit(vms, { mode, timeScale, arrivalGapSeconds });
   }
 
   const fields = [
@@ -66,7 +70,25 @@ export default function VMSubmissionForm({ onSubmit, loading }) {
           </h2>
           <p className="text-muted">Configure VMs to place. Min/Max/Avg CPU drives classification.</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-center">
+          <div className="mode-toggle" role="group" aria-label="Simulation mode">
+            <button
+              type="button"
+              className={mode === 'batch' ? 'active' : ''}
+              onClick={() => setMode('batch')}
+              id="btn-mode-batch"
+            >
+              Instant
+            </button>
+            <button
+              type="button"
+              className={mode === 'live' ? 'active' : ''}
+              onClick={() => setMode('live')}
+              id="btn-mode-live"
+            >
+              Live
+            </button>
+          </div>
           <button type="button" className="btn btn-ghost" onClick={addVm} id="btn-add-vm">
             + Add VM
           </button>
@@ -76,7 +98,9 @@ export default function VMSubmissionForm({ onSubmit, loading }) {
             disabled={loading || vms.length === 0}
             id="btn-run-simulation"
           >
-            {loading ? <><span className="spinner" /> Running…</> : '▶ Run Simulation'}
+            {loading
+              ? <><span className="spinner" /> Running…</>
+              : mode === 'live' ? '▶ Start Live Simulation' : '▶ Run Simulation'}
           </button>
         </div>
       </div>
@@ -137,8 +161,42 @@ export default function VMSubmissionForm({ onSubmit, loading }) {
         ))}
       </div>
 
+      {mode === 'live' && (
+        <div className="flex gap-4 mt-4" id="live-options">
+          <div className="input-group" style={{ maxWidth: 220 }}>
+            <label className="input-label" htmlFor="live-time-scale">Speed (sim s / real s)</label>
+            <input
+              id="live-time-scale"
+              className="input-field"
+              type="number"
+              min={1}
+              max={100000}
+              step="any"
+              value={timeScale}
+              onChange={(e) => setTimeScale(Number(e.target.value))}
+              required
+            />
+          </div>
+          <div className="input-group" style={{ maxWidth: 220 }}>
+            <label className="input-label" htmlFor="live-arrival-gap">VM arrival gap (sim s)</label>
+            <input
+              id="live-arrival-gap"
+              className="input-field"
+              type="number"
+              min={0}
+              max={86400}
+              step="any"
+              value={arrivalGapSeconds}
+              onChange={(e) => setArrivalGapSeconds(Number(e.target.value))}
+              required
+            />
+          </div>
+        </div>
+      )}
+
       <p className="text-muted mt-4">
         {vms.length} VM{vms.length !== 1 ? 's' : ''} queued for simulation
+        {mode === 'live' && ' · placements stream to the dashboard as they happen'}
       </p>
     </form>
   );

@@ -21,6 +21,8 @@
     <properties>
         <java.version>17</java.version>
         <cloudsimplus.version>8.0.0</cloudsimplus.version>
+        <!-- Slow validation tests are skipped by default; clear this to run them -->
+        <test.excludedGroups>validation</test.excludedGroups>
     </properties>
 
     <dependencies>
@@ -72,6 +74,13 @@
                             <artifactId>lombok</artifactId>
                         </exclude>
                     </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>${test.excludedGroups}</excludedGroups>
                 </configuration>
             </plugin>
         </plugins>

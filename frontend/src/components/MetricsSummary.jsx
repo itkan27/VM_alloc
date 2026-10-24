@@ -1,6 +1,6 @@
 /**
  * MetricsSummary
- * Four headline cards showing totals from the simulation summary.
+ * Headline cards showing totals from the simulation summary.
  */
 export default function MetricsSummary({ summary }) {
   if (!summary) return null;
@@ -10,9 +10,13 @@ export default function MetricsSummary({ summary }) {
     spikyVms,
     stableVms,
     hostsUsed,
+    performanceHostsUsed,
+    ecoHostsUsed,
     failedAllocations,
+    spikyOverflowCount,
     avgCpuUtilization,
-    simulationTimeSeconds,
+    avgHostActiveSeconds,
+    totalEnergyKWh,
   } = summary;
 
   const cards = [
@@ -27,7 +31,7 @@ export default function MetricsSummary({ summary }) {
       id: 'card-hosts-used',
       label: 'Hosts Used',
       value: hostsUsed,
-      sub: `${failedAllocations} allocation failure${failedAllocations !== 1 ? 's' : ''}`,
+      sub: `${performanceHostsUsed} perf · ${ecoHostsUsed} eco · ${failedAllocations} failure${failedAllocations !== 1 ? 's' : ''}`,
       color: failedAllocations > 0 ? 'var(--accent-danger)' : 'var(--accent-success)',
     },
     {
@@ -38,16 +42,25 @@ export default function MetricsSummary({ summary }) {
       color: avgCpuUtilization > 0.8 ? 'var(--accent-spiky)' : 'var(--accent-stable)',
     },
     {
-      id: 'card-sim-time',
+      id: 'card-energy',
+      label: 'Energy Consumed',
+      value: `${totalEnergyKWh.toFixed(3)} kWh`,
+      sub: spikyOverflowCount > 0
+        ? `${spikyOverflowCount} spiky VM${spikyOverflowCount !== 1 ? 's' : ''} overflowed to Eco`
+        : 'idle hosts powered off',
+      color: 'var(--accent-success)',
+    },
+    {
+      id: 'card-host-time',
       label: 'Avg Host Time',
-      value: `${simulationTimeSeconds.toFixed(1)}ms`,
-      sub: 'average time taken per host',
+      value: `${avgHostActiveSeconds.toFixed(1)} s`,
+      sub: 'measured active time per host',
       color: 'var(--text-secondary)',
     },
   ];
 
   return (
-    <div className="section-grid cols-4">
+    <div className="section-grid cols-auto">
       {cards.map((c) => (
         <div className="card metric-card" key={c.id} id={c.id}>
           <span className="metric-label">{c.label}</span>

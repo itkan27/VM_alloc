@@ -4,13 +4,20 @@ import VMSubmissionForm from './components/VMSubmissionForm';
 import PlacementTable from './components/PlacementTable';
 import HostMetricsChart from './components/HostMetricsChart';
 import MetricsSummary from './components/MetricsSummary';
-import { runSimulation, pingBackend } from './services/api';
+import LiveStatus from './components/LiveStatus';
+import useSimulationStream from './hooks/useSimulationStream';
+import { runSimulation, startLiveSimulation, stopLiveSimulation, pingBackend } from './services/api';
 
 export default function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [backendOnline, setBackendOnline] = useState(null); // null = unknown
+  const [sessionId, setSessionId] = useState(null);
+  const [stopping, setStopping] = useState(false);
+
+  const stream = useSimulationStream(sessionId);
+  const liveRunning = sessionId && (stream.status === 'connecting' || stream.status === 'running');
 
   // Probe backend on mount
   useEffect(() => {
@@ -19,12 +26,29 @@ export default function App() {
       .catch(() => setBackendOnline(false));
   }, []);
 
-  async function handleSubmit(vms) {
+  // When a live session ends, show its final result like a batch run
+  useEffect(() => {
+    if (stream.result) {
+      setResult(stream.result);
+      setStopping(false);
+    }
+    if (stream.status === 'failed') {
+      setError(stream.error);
+      setStopping(false);
+    }
+  }, [stream.result, stream.status, stream.error]);
+
+  async function handleSubmit(vms, { mode, timeScale, arrivalGapSeconds }) {
     setLoading(true);
     setError(null);
+    setResult(null);
+    setSessionId(null);
     try {
-      const data = await runSimulation(vms);
-      setResult(data);
+      if (mode === 'live') {
+        setSessionId(await startLiveSimulation(vms, { timeScale, arrivalGapSeconds }));
+      } else {
+        setResult(await runSimulation(vms));
+      }
     } catch (err) {
       setError(
         err?.response?.data?.message ||
@@ -34,6 +58,22 @@ export default function App() {
       setLoading(false);
     }
   }
+
+  async function handleStop() {
+    setStopping(true);
+    try {
+      await stopLiveSimulation(sessionId);
+    } catch {
+      setStopping(false);
+    }
+  }
+
+  // Final result (batch or finished live run) takes precedence over live state
+  const view = result
+    ? { placements: result.placements, hosts: result.hostMetrics }
+    : liveRunning
+    ? { placements: stream.placements, hosts: stream.hosts }
+    : null;
 
   return (
     <div className="app-shell">
@@ -61,7 +101,7 @@ export default function App() {
 
         {/* ── Submission form ─────────────────────────────── */}
         <div className="card mb-6">
-          <VMSubmissionForm onSubmit={handleSubmit} loading={loading} />
+          <VMSubmissionForm onSubmit={handleSubmit} loading={loading || liveRunning} />
         </div>
 
         {/* ── Error banner ─────────────────────────────────── */}
@@ -76,11 +116,13 @@ export default function App() {
         )}
 
         {/* ── Results section ──────────────────────────────── */}
-        {result && (
+        {view && (
           <>
             {/* Summary cards */}
             <div className="mb-6">
-              <MetricsSummary summary={result.summary} />
+              {result
+                ? <MetricsSummary summary={result.summary} />
+                : <LiveStatus stream={stream} onStop={handleStop} stopping={stopping} />}
             </div>
 
             {/* Charts + table */}
@@ -88,13 +130,13 @@ export default function App() {
               {/* Host metrics chart */}
               <div className="card">
                 <div className="card-title">📊 Host Metrics</div>
-                <HostMetricsChart hostMetrics={result.hostMetrics} />
+                <HostMetricsChart hostMetrics={view.hosts} live={!result} />
               </div>
 
               {/* Classification breakdown */}
               <div className="card">
                 <div className="card-title">🔍 Classification Breakdown</div>
-                <ClassificationBreakdown placements={result.placements} />
+                <ClassificationBreakdown placements={view.placements} />
               </div>
             </div>
 
@@ -103,16 +145,16 @@ export default function App() {
               <div className="card-title flex-between">
                 <span>📋 VM Placement Results</span>
                 <span className="text-muted">
-                  {result.placements.length} VMs
+                  {view.placements.length} VMs
                 </span>
               </div>
-              <PlacementTable placements={result.placements} />
+              <PlacementTable placements={view.placements} />
             </div>
           </>
         )}
 
         {/* ── Empty hero ────────────────────────────────────── */}
-        {!result && !loading && (
+        {!view && !loading && (
           <div className="card" style={{ padding: '4rem 2rem' }}>
             <div className="empty-state">
               <span className="icon" style={{ fontSize: '4rem', opacity: 0.3 }}>☁</span>
@@ -120,7 +162,8 @@ export default function App() {
                 Ready to simulate
               </span>
               <span>
-                Add VMs above and click <strong>▶ Run Simulation</strong> to see placement results.
+                Add VMs above and click <strong>▶ Run Simulation</strong> to see placement results,
+                or switch to <strong>Live</strong> to watch them being placed.
               </span>
             </div>
           </div>
@@ -134,6 +177,7 @@ export default function App() {
 function ClassificationBreakdown({ placements }) {
   const spiky = placements.filter((p) => p.vmType === 'SPIKY');
   const stable = placements.filter((p) => p.vmType === 'STABLE');
+  const overflow = placements.filter((p) => p.placementReason === 'SPIKY_OVERFLOW_ECO').length;
 
   const spikyPct = placements.length ? (spiky.length / placements.length) * 100 : 0;
   const stablePct = 100 - spikyPct;
@@ -158,7 +202,7 @@ function ClassificationBreakdown({ placements }) {
             ⚡ SPIKY VMs
           </div>
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
-            each on a separate host
+            Performance Zone, peak headroom
           </div>
         </div>
         <div
@@ -177,7 +221,7 @@ function ClassificationBreakdown({ placements }) {
             ● STABLE VMs
           </div>
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
-            best-fit packed together
+            Eco Zone, best-fit packed
           </div>
         </div>
       </div>
@@ -217,7 +261,10 @@ function ClassificationBreakdown({ placements }) {
       {/* Per-host spiky isolation confirmation */}
       <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
         <strong style={{ color: 'var(--text-primary)' }}>Isolation check: </strong>
-        Spiky VMs are placed on dedicated hosts with no other spiky VM co-located.
+        Spiky VMs run in the Performance Zone with headroom for their peak demand
+        {overflow > 0
+          ? `; ${overflow} overflowed to an Eco host of their own.`
+          : '; stable VMs are packed into the Eco Zone.'}
       </div>
     </div>
   );
