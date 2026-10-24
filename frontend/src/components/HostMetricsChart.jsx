@@ -40,12 +40,21 @@ const HostTooltip = ({ active, payload, label }) => {
         <p style={{ color: '#94a3b8' }}>No VMs — powered off</p>
       ) : (
         <>
-          <p>CPU (avg): <strong>{(h.cpuUtilization * 100).toFixed(1)}%</strong></p>
           <p>
-            Peak-safe demand: <strong>{Math.round(h.peakDemandMips)}</strong> / {Math.round(h.capacityMips)} MIPS
+            CPU ({h.maxCpuUtilization != null ? 'time-avg' : 'now'}):{' '}
+            <strong style={{ color: h.cpuUtilization > 1 ? '#f87171' : undefined }}>
+              {(h.cpuUtilization * 100).toFixed(1)}%
+            </strong>{' '}
+            of {Math.round(h.capacityMips)} MIPS
           </p>
+          {h.maxCpuUtilization != null && (
+            <p>Peak load: <strong>{(h.maxCpuUtilization * 100).toFixed(0)}%</strong>
+              {h.overloadSeconds > 0 && ` · overloaded ${h.overloadSeconds.toFixed(0)} s`}
+            </p>
+          )}
           <p>VMs: <strong>{h.totalVms}</strong> ({h.spikyVms} spiky · {h.stableVms} stable)</p>
-          {h.energyKWh != null && <p>Energy: <strong>{h.energyKWh.toFixed(3)} kWh</strong></p>}
+          {h.migrationsIn != null && <p>Migrations: {h.migrationsIn} in · {h.migrationsOut} out</p>}
+          {h.energyKWh != null && <p>Energy: <strong>{h.energyKWh.toFixed(4)} kWh</strong></p>}
         </>
       )}
     </div>
@@ -100,6 +109,9 @@ export default function HostMetricsChart({ hostMetrics, live = false }) {
     );
   }
 
+  // Live loads can pass 100% while a spike overloads a host
+  const maxUtil = Math.max(100, ...hostMetrics.map((h) => Math.ceil(h.cpuUtilization * 10) * 10));
+
   const data = hostMetrics.map((h) => ({
     name: h.hostName,
     'CPU Util %': parseFloat((h.cpuUtilization * 100).toFixed(1)),
@@ -117,7 +129,7 @@ export default function HostMetricsChart({ hostMetrics, live = false }) {
           <BarChart data={data} barSize={22} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
             <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
-            <YAxis unit="%" domain={[0, 100]} tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis unit="%" domain={[0, maxUtil]} tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
             <Tooltip content={<HostTooltip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
             <ReferenceLine y={90} stroke="rgba(248,113,113,0.6)" strokeDasharray="4 4" />
             <Bar dataKey="CPU Util %" radius={[4, 4, 0, 0]} isAnimationActive={!live}>
@@ -126,6 +138,8 @@ export default function HostMetricsChart({ hostMetrics, live = false }) {
                   key={entry.name}
                   fill={ZONE_COLORS[entry.raw.zone]}
                   fillOpacity={entry.raw.active ? 1 : 0.25}
+                  stroke={entry.raw.cpuUtilization > 1 ? '#f87171' : undefined}
+                  strokeWidth={2}
                 />
               ))}
             </Bar>

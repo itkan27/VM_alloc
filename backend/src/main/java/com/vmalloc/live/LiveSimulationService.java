@@ -20,7 +20,7 @@ import java.util.Map;
  * Starts live simulations on the background executor and forwards their
  * progress to the session as SSE events:
  *
- *   init → placement / placement_failed / host_update … → completed | failed
+ *   init → placement / placement_failed / spike / migration / host_update … → completed | failed
  */
 @Service
 public class LiveSimulationService {
@@ -99,6 +99,16 @@ public class LiveSimulationService {
             @Override
             public void onHostUpdate(HostUpdateEvent event) {
                 session.publish("host_update", event);
+            }
+
+            @Override
+            public void onSpike(SpikeEvent event) {
+                session.publish("spike", event);
+            }
+
+            @Override
+            public void onMigration(MigrationEvent event) {
+                session.publish("migration", event);
             }
         };
     }

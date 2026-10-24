@@ -5,6 +5,8 @@ import PlacementTable from './components/PlacementTable';
 import HostMetricsChart from './components/HostMetricsChart';
 import MetricsSummary from './components/MetricsSummary';
 import LiveStatus from './components/LiveStatus';
+import DatacenterView from './components/DatacenterView';
+import MigrationLog from './components/MigrationLog';
 import useSimulationStream from './hooks/useSimulationStream';
 import { runSimulation, startLiveSimulation, stopLiveSimulation, pingBackend } from './services/api';
 
@@ -70,10 +72,11 @@ export default function App() {
 
   // Final result (batch or finished live run) takes precedence over live state
   const view = result
-    ? { placements: result.placements, hosts: result.hostMetrics }
+    ? { placements: result.placements, hosts: result.hostMetrics, migrations: result.migrations }
     : liveRunning
-    ? { placements: stream.placements, hosts: stream.hosts }
+    ? { placements: stream.placements, hosts: stream.hosts, migrations: stream.migrations }
     : null;
+  const vmTypes = Object.fromEntries((view?.placements || []).map((p) => [p.vmId, p.vmType]));
 
   return (
     <div className="app-shell">
@@ -125,6 +128,19 @@ export default function App() {
                 : <LiveStatus stream={stream} onStop={handleStop} stopping={stopping} />}
             </div>
 
+            {/* Live datacenter: VMs on hosts right now, migration arrows */}
+            {!result && (
+              <div className="card mb-6">
+                <div className="card-title">🖥 Datacenter (live)</div>
+                <DatacenterView
+                  hosts={stream.hosts}
+                  vmTypes={vmTypes}
+                  spiking={stream.spiking}
+                  migrations={stream.migrations}
+                />
+              </div>
+            )}
+
             {/* Charts + table */}
             <div className="section-grid cols-2 mb-6">
               {/* Host metrics chart */}
@@ -148,7 +164,16 @@ export default function App() {
                   {view.placements.length} VMs
                 </span>
               </div>
-              <PlacementTable placements={view.placements} />
+              <PlacementTable placements={view.placements} live={result ? null : stream} />
+            </div>
+
+            {/* Migration log */}
+            <div className="card mt-6">
+              <div className="card-title flex-between">
+                <span>⇄ Live Migrations</span>
+                <span className="text-muted">{view.migrations.length} migrations</span>
+              </div>
+              <MigrationLog migrations={view.migrations} />
             </div>
           </>
         )}
@@ -177,7 +202,7 @@ export default function App() {
 function ClassificationBreakdown({ placements }) {
   const spiky = placements.filter((p) => p.vmType === 'SPIKY');
   const stable = placements.filter((p) => p.vmType === 'STABLE');
-  const overflow = placements.filter((p) => p.placementReason === 'SPIKY_OVERFLOW_ECO').length;
+  const migrated = placements.filter((p) => p.migrationCount > 0).length;
 
   const spikyPct = placements.length ? (spiky.length / placements.length) * 100 : 0;
   const stablePct = 100 - spikyPct;
@@ -202,7 +227,7 @@ function ClassificationBreakdown({ placements }) {
             ⚡ SPIKY VMs
           </div>
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
-            Performance Zone, peak headroom
+            one per Eco host, migrate on spikes
           </div>
         </div>
         <div
@@ -261,10 +286,9 @@ function ClassificationBreakdown({ placements }) {
       {/* Per-host spiky isolation confirmation */}
       <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
         <strong style={{ color: 'var(--text-primary)' }}>Isolation check: </strong>
-        Spiky VMs run in the Performance Zone with headroom for their peak demand
-        {overflow > 0
-          ? `; ${overflow} overflowed to an Eco host of their own.`
-          : '; stable VMs are packed into the Eco Zone.'}
+        Every VM starts in the Eco Zone with at most one spiky VM per host. Spiky VMs
+        move to the Performance Zone while they spike
+        {migrated > 0 ? ` (${migrated} VM${migrated !== 1 ? 's' : ''} migrated so far).` : '.'}
       </div>
     </div>
   );

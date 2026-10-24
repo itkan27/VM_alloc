@@ -11,17 +11,23 @@
 
 | Phase | Status |
 |---|---|
-| 0 — Groundwork | ✅ Done. VM sizing fix, confirmed-only ledger booking/release, policy base class, all hosts in host order, measured host time in seconds |
-| 1 — Performance & Eco zones | ✅ Done. Zoned policy with peak-safe admission and overflow rules, power models on all hosts, energy card, zone colours, Zone column |
-| 2 — Real-time dashboard | ✅ Done. Live sessions on a background executor, SSE stream with replay (`Last-Event-ID`), Instant / Live modes, animated rows |
-| 3 — Live placement & migration | ⏳ Next |
+| 0 — Groundwork | ✅ Done. VM sizing fix, confirmed-only ledger booking/release, policy base class, all hosts in host order |
+| 1 — Performance & Eco zones | ✅ Done, **redesigned**: zones are decoupled. Every VM starts in the Eco Zone (one spiky VM per host, stable best-fit); the Performance Zone starts empty |
+| 2 — Real-time dashboard | ✅ Done. Live sessions on a background executor, SSE stream with replay (`Last-Event-ID`), Instant / Live modes |
+| 3 — Live placement & migration | ✅ Done. Simulated spikes (odd VMs after 15 s for 5 s, even VMs after 20 s for 5 s, repeating); CPU / RAM / MIPS thresholds trigger CloudSim live migration Eco → Performance and back; live datacenter view with migration arrows and migration log |
 | 4 — Comparison with base paper | ⏳ Next |
-| Testing & validation | Deferred to the end. The slow randomized suite is tagged `validation` and excluded from `mvn test` |
+| Testing & validation | Deferred to the end. All tests are tagged `validation` and excluded from `mvn test` |
+
+The design actually implemented replaces §4.3 and §6.3 below: placement is Eco-only, and
+migration is driven by each spiky VM's simulated load crossing a threshold (rule R1),
+not by host overload (R2–R4 not implemented).
 
 Notes from implementation:
 * CloudSim truncates VM MIPS to whole numbers; a cloudlet sized from fractional MIPS never completes. VM MIPS per PE is now rounded down.
 * Finished VMs are destroyed 1 s after their cloudlet ends (`setVmDestructionDelay`), so capacity and power are released on time.
-* A stall guard terminates any run that passes `2 × last expected event + 60 s`. One random validation batch still runs far longer than expected; investigate during the testing phase.
+* CloudSim VMs are sized at average demand; spikes are applied on top by `SpikeMigrationController` through the ledger's current demand, which drives energy, utilisation and overload time.
+* Migration time = VM RAM ÷ target host bandwidth (× `sim.migration.bandwidthPercent`), so Performance hosts get 40 Gbps.
+* A stall guard terminates any run that passes `2 × last expected event + 60 s`. One random validation batch ran far longer than expected under the previous design; re-check during the testing phase.
 * The plan's `/api/simulate/*` paths were implemented as `/api/simulation/sessions/*` (§2).
 
 ---

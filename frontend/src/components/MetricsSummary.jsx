@@ -13,7 +13,9 @@ export default function MetricsSummary({ summary }) {
     performanceHostsUsed,
     ecoHostsUsed,
     failedAllocations,
-    spikyOverflowCount,
+    migrations,
+    spikes,
+    overloadHostSeconds,
     avgCpuUtilization,
     avgHostActiveSeconds,
     totalEnergyKWh,
@@ -38,16 +40,21 @@ export default function MetricsSummary({ summary }) {
       id: 'card-avg-util',
       label: 'Avg CPU Util',
       value: `${(avgCpuUtilization * 100).toFixed(1)}%`,
-      sub: 'across active hosts',
+      sub: 'time-averaged, active hosts',
       color: avgCpuUtilization > 0.8 ? 'var(--accent-spiky)' : 'var(--accent-stable)',
+    },
+    {
+      id: 'card-migrations',
+      label: 'Live Migrations',
+      value: migrations,
+      sub: `${spikes} spike${spikes !== 1 ? 's' : ''} · ${overloadHostSeconds.toFixed(0)} s host overload`,
+      color: 'var(--accent-spiky)',
     },
     {
       id: 'card-energy',
       label: 'Energy Consumed',
-      value: `${totalEnergyKWh.toFixed(3)} kWh`,
-      sub: spikyOverflowCount > 0
-        ? `${spikyOverflowCount} spiky VM${spikyOverflowCount !== 1 ? 's' : ''} overflowed to Eco`
-        : 'idle hosts powered off',
+      value: `${totalEnergyKWh.toFixed(4)} kWh`,
+      sub: 'idle hosts powered off',
       color: 'var(--accent-success)',
     },
     {

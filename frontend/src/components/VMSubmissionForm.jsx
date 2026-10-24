@@ -26,8 +26,8 @@ function generateId() {
 export default function VMSubmissionForm({ onSubmit, loading }) {
   const [vms, setVms] = useState([{ ...DEFAULT_VM, vmId: generateId() }]);
   const [mode, setMode] = useState('batch'); // batch | live
-  const [timeScale, setTimeScale] = useState(120);
-  const [arrivalGapSeconds, setArrivalGapSeconds] = useState(30);
+  const [timeScale, setTimeScale] = useState(5);
+  const [arrivalGapSeconds, setArrivalGapSeconds] = useState(5);
 
   function addVm() {
     setVms((prev) => [...prev, { ...DEFAULT_VM, vmId: generateId() }]);

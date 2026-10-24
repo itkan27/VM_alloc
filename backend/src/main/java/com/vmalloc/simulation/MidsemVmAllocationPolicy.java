@@ -7,7 +7,8 @@ import java.util.Comparator;
 import java.util.Optional;
 
 /**
- * Midsem CPU-Aware Bin-Packing Policy (zone-unaware), kept as an ablation baseline.
+ * Midsem CPU-Aware Bin-Packing Policy (zone-unaware, no migration), kept as an
+ * ablation baseline.
  *
  * Rules:
  *   1. Σ avg demand on a host must NOT exceed the host's total MIPS.
@@ -15,7 +16,7 @@ import java.util.Optional;
  *   3. STABLE VMs use Best-Fit: pack into the host with the least remaining headroom.
  *   4. SPIKY  VMs use First-Fit with isolation: first host that has capacity and no spiky.
  *
- * Only average demand is budgeted, so a spike can overload a host shared with stable VMs.
+ * Spiky VMs never move, so a spike can overload a host shared with stable VMs.
  */
 public class MidsemVmAllocationPolicy extends TrackedAllocationPolicy {
 

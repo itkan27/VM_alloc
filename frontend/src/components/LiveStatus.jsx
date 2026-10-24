@@ -1,16 +1,18 @@
 /**
  * LiveStatus
  * Headline cards for a running live simulation: clock, placements so far,
- * hosts currently powered on, and a Stop button.
+ * hosts currently powered on, spikes and migrations, and a Stop button.
  */
 export default function LiveStatus({ stream, onStop, stopping }) {
-  const { status, simTime, placements, hosts } = stream;
+  const { status, simTime, placements, hosts, migrations, spiking } = stream;
 
   const placed = placements.filter((p) => p.allocationSuccess).length;
   const failed = placements.length - placed;
   const activeHosts = hosts.filter((h) => h.active);
   const perf = activeHosts.filter((h) => h.zone === 'PERFORMANCE').length;
   const running = status === 'running' || status === 'connecting';
+  const spikingNow = Object.values(spiking).filter(Boolean).length;
+  const inPerf = Object.values(stream.location).filter((l) => l.zone === 'PERFORMANCE').length;
 
   const cards = [
     {
@@ -33,6 +35,13 @@ export default function LiveStatus({ stream, onStop, stopping }) {
       value: activeHosts.length,
       sub: `${perf} perf · ${activeHosts.length - perf} eco`,
       color: 'var(--accent-stable)',
+    },
+    {
+      id: 'live-migrations',
+      label: 'Live Migrations',
+      value: migrations.length,
+      sub: `${spikingNow} spiking now · ${inPerf} in Performance`,
+      color: 'var(--accent-spiky)',
     },
   ];
 

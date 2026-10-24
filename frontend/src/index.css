@@ -486,3 +486,75 @@ tbody td {
 }
 
 .row-new { animation: rowIn 0.5s ease-out; }
+
+/* ── Datacenter view (live migration) ───────────────────────── */
+.dc-view { position: relative; display: flex; flex-direction: column; gap: 1.25rem; }
+
+.dc-zone { border-radius: 12px; padding: 0.9rem 1rem; }
+.dc-zone-perf { background: rgba(249,115,22,0.05); border: 1px solid rgba(249,115,22,0.25); }
+.dc-zone-eco  { background: rgba(34,197,94,0.04); border: 1px solid rgba(34,197,94,0.22); }
+
+.dc-zone-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.75rem;
+}
+.dc-zone-perf .dc-zone-title { color: #f97316; }
+.dc-zone-eco .dc-zone-title  { color: #22c55e; }
+
+.dc-hosts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.75rem; }
+
+.dc-host {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+  min-height: 86px;
+  transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+}
+.dc-host-off { opacity: 0.45; }
+.dc-host-overload { border-color: var(--accent-danger); box-shadow: 0 0 12px rgba(248,113,113,0.35); }
+
+.dc-host-name { font-size: 0.78rem; font-weight: 700; color: var(--text-primary); }
+.dc-host-load { font-size: 0.72rem; color: var(--text-secondary); font-family: 'Courier New', monospace; }
+.dc-host-overload .dc-host-load { color: var(--accent-danger); font-weight: 700; }
+
+.dc-load-bar { height: 5px; border-radius: 999px; background: rgba(255,255,255,0.06); margin: 0.4rem 0; overflow: hidden; }
+.dc-load-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent-stable), var(--accent-primary)); transition: width 0.3s; }
+.dc-host-overload .dc-load-bar > div { background: var(--accent-danger); }
+
+.dc-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.dc-chip {
+  font-size: 0.65rem;
+  font-family: 'Courier New', monospace;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.dc-chip-stable { background: rgba(34,211,238,0.1); color: var(--accent-stable); border-color: rgba(34,211,238,0.25); }
+.dc-chip-spiky  { background: rgba(249,115,22,0.12); color: var(--accent-spiky); border-color: rgba(249,115,22,0.3); }
+.dc-chip-spiking { animation: spikePulse 0.8s ease-in-out infinite alternate; color: #fff; background: rgba(248,113,113,0.5); }
+
+@keyframes spikePulse {
+  from { box-shadow: 0 0 0 0 rgba(248,113,113,0.6); }
+  to   { box-shadow: 0 0 0 4px rgba(248,113,113,0); }
+}
+
+.dc-arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.dc-arrow path {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-dasharray: 600;
+  stroke-dashoffset: 600;
+  animation: drawArrow 1.8s ease-out forwards;
+}
+
+@keyframes drawArrow {
+  0%   { stroke-dashoffset: 600; opacity: 1; }
+  60%  { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
+.migration-log { max-height: 360px; overflow-y: auto; }

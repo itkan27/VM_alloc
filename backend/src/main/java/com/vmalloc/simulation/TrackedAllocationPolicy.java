@@ -23,6 +23,8 @@ import java.util.stream.Stream;
  *   1. defaultFindHostForVm() only CHOOSES a host (no side effects).
  *   2. allocateHostForVm(vm, host) books the ledger once CloudSim confirms the VM was created.
  *   3. deallocateHostForVm(vm) releases it when the VM finishes or leaves the host.
+ * A live migration is a deallocate on the source followed by an allocate on the
+ * target, so the ledger follows migrating VMs automatically.
  *
  * Candidate hosts must also pass CloudSim's own suitability check, so CloudSim never
  * rejects a host the policy picked.
@@ -34,8 +36,8 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
     /** Host chosen by a policy together with the rule that chose it */
     protected record Selection(Host host, String reason) {}
 
-    /** Where a VM was booked, kept after the VM finishes for result reporting */
-    public record Placement(Host host, Zone zone, String reason) {}
+    /** A VM's initial placement, kept after the VM moves or finishes for result reporting */
+    public record Placement(Host host, Zone zone, String reason, double placedAt) {}
 
     protected final HostLedger ledger = new HostLedger();
 
@@ -73,10 +75,9 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
 
         selection.ifPresentOrElse(
                 s -> pendingReasons.put(vm, s.reason()),
-                () -> log.debug("No host found for {} ({}, avg={} MIPS, peak={} MIPS)",
+                () -> log.debug("No host found for {} ({}, avg={} MIPS)",
                         profile.vmId(), profile.type(),
-                        String.format("%.0f", profile.avgDemandMips()),
-                        String.format("%.0f", profile.peakDemandMips())));
+                        String.format("%.0f", profile.avgDemandMips())));
 
         return selection.map(Selection::host);
     }
@@ -89,15 +90,17 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
         VmProfile profile = profileOf(vm);
         ledger.book(host, profile);
         bookedHosts.put(vm, host);
+
+        // A VM that already has a placement is arriving through a live migration
+        if (placements.containsKey(vm)) return suitability;
+
         String reason = Objects.requireNonNullElse(pendingReasons.remove(vm), "DIRECT");
-        Placement placement = new Placement(host, zoneOf(host), reason);
+        Placement placement = new Placement(host, zoneOf(host), reason, vm.getSimulation().clock());
         placements.put(vm, placement);
 
-        double cap = host.getTotalMipsCapacity();
-        log.debug("{} ({}) -> Host-{} [{}] via {} | avg {}/{} MIPS | peak-safe {}/{} MIPS",
+        log.debug("{} ({}) -> Host-{} [{}] via {} | avg {}/{} MIPS",
                 profile.vmId(), profile.type(), host.getId(), zoneOf(host), reason,
-                String.format("%.0f", ledger.avgMips(host)), (long) cap,
-                String.format("%.0f", ledger.guaranteedMips(host)), (long) cap);
+                String.format("%.0f", ledger.avgMips(host)), (long) host.getTotalMipsCapacity());
         placementListener.onPlaced(vm, profile, placement);
         return suitability;
     }
@@ -126,9 +129,8 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
     public VmProfile profileOf(Vm vm) {
         VmProfile profile = profiles.get(vm);
         if (profile != null) return profile;
-        double mips = vm.getTotalMipsCapacity();
-        return new VmProfile(vm.getDescription(), VmType.STABLE, mips, mips,
-                vm.getRam().getCapacity(), vm.getBw().getCapacity());
+        return new VmProfile(vm.getDescription(), VmType.STABLE, vm.getTotalMipsCapacity(), 100, 100,
+                vm.getRam().getCapacity(), vm.getBw().getCapacity(), 0);
     }
 
     // ─── Helpers for subclasses ──────────────────────────────────────────────

@@ -1,17 +1,19 @@
 # Efficient VM Placement in Cloud Environments
 
-> MLP-based classification (Spiky / Stable) + zoned CloudSim Plus allocation + live React dashboard
+> MLP-based classification (Spiky / Stable) + CloudSim Plus Eco/Performance zones with spike-driven live migration + live React dashboard
 
 ## Currently Implemented Features
 
 | Feature | Description |
 |---|---|
 | Classification | Heuristic Spiky/Stable classifier (ML service call ready, currently disabled) |
-| Performance & Eco Zones | High-MIPS Performance hosts for SPIKY VMs with peak headroom; Eco hosts densely packed with STABLE VMs |
-| Energy model | `PowerModelHostSimple` on every host; energy integrated over simulated time, idle hosts powered off |
+| Performance & Eco Zones | Decoupled zones: every VM starts in the Eco Zone (one spiky VM per host, stable VMs best-fit); the Performance Zone starts empty |
+| Spike simulation | Odd-numbered spiky VMs spike 15 s after start for 5 s, even-numbered after 20 s for 5 s (repeating); CPU → maxCpu, RAM usage → 90% |
+| Live migration | A spiky VM crossing a CPU / RAM / MIPS threshold is live-migrated to the Performance Zone and back to the Eco Zone once all thresholds drop |
+| Energy model | `PowerModelHostSimple` on every host; energy integrated over simulated time from the live load, idle hosts powered off |
 | Batch simulation | `POST /api/simulation/run` returns placements, per-host metrics and a summary |
-| Live simulation | VMs arrive over time and placements stream to the dashboard over Server-Sent Events |
-| Dashboard | Zone-coloured host charts, Zone column, energy card, Instant / Live modes with animated rows |
+| Live simulation | VMs arrive over time; placements, spikes and migrations stream to the dashboard over Server-Sent Events |
+| Dashboard | Live datacenter view with migration arrows, migration log, zone-coloured host charts, energy and migration cards, Instant / Live modes |
 | Ablation policy | The midsem zone-unaware policy is kept (`sim.policy=MIDSEM`) for comparison |
 
 The roadmap for the remaining phases is in [`docs/FUTURE_WORK_PLAN.md`](docs/FUTURE_WORK_PLAN.md).
@@ -55,10 +57,12 @@ VM_alloc/
 │       └── simulation/
 │           ├── CloudSimRunner.java              ← builds zoned DC, runs batch / live simulations
 │           ├── TrackedAllocationPolicy.java     ← shared ledger + zones; books only confirmed placements
-│           ├── ZonedVmAllocationPolicy.java     ← Performance / Eco zone rules
+│           ├── ZonedVmAllocationPolicy.java     ← Eco-only initial placement + migration targets
 │           ├── MidsemVmAllocationPolicy.java    ← midsem policy (ablation baseline)
-│           ├── HostLedger.java                  ← per-host CPU / peak / RAM / BW bookkeeping
-│           └── EnergyAccountant.java            ← E = Σ P(u)·Δt per host
+│           ├── SpikeSchedule.java               ← simulated VM load (odd / even spike windows)
+│           ├── SpikeMigrationController.java    ← thresholds → live migrations between zones
+│           ├── HostLedger.java                  ← per-host CPU (avg + current) / RAM / BW bookkeeping
+│           └── HostMonitor.java                 ← energy, utilisation, overload time per host
 │
 ├── ml-service/                 ← Python FastAPI + ONNX
 │   ├── main.py
@@ -79,7 +83,9 @@ VM_alloc/
             ├── PlacementTable.jsx
             ├── HostMetricsChart.jsx
             ├── MetricsSummary.jsx
-            └── LiveStatus.jsx
+            ├── LiveStatus.jsx
+            ├── DatacenterView.jsx         ← hosts per zone, VM chips, migration arrows
+            └── MigrationLog.jsx
 ```
 
 ## Running All Three Services
@@ -111,8 +117,7 @@ npm run dev
 ### Tests
 ```bash
 cd backend
-mvn test                                             # fast unit and scenario tests
-mvn test -Dtest.excludedGroups= -Dgroups=validation  # slow randomized validation suite
+mvn test -Dtest.excludedGroups= -Dgroups=validation  # validation suite (deferred; excluded from the default build)
 ```
 
 ## Classification Logic
@@ -126,38 +131,52 @@ mvn test -Dtest.excludedGroups= -Dgroups=validation  # slow randomized validatio
 After training, export your scikit-learn model to ONNX and place it at
 `ml-service/models/mlp_classifier.onnx`. See `ml-service/README.md` for details.
 
-## Allocation Policy
+## Allocation Policy & Live Migration
 
 Every VM has an **average demand** (`avgCpu% × mips × cores`) and a **peak demand**
-(`maxCpu% × mips × cores`). The default `ZONED` policy keeps every host *peak-safe*:
+(`maxCpu% × mips × cores`).
 
-```
-Σ peak(spiky VMs) + Σ avg(stable VMs)  ≤  host capacity (pes × mips_per_pe)
-```
+**1. Initial placement — Eco Zone only** (`ZonedVmAllocationPolicy`)
 
-so a host is never overloaded even if all of its spiky VMs spike at once.
+| VM | Rule |
+|---|---|
+| **SPIKY** | First-Fit on an Eco host with no other spiky VM (at most one per host) |
+| **STABLE** | Best-Fit on an Eco host (densest host that still fits) |
 
-| VM | Preferred | Overflow |
+On every host `Σ avg demand ≤ capacity`. The Performance Zone starts empty.
+
+**2. Spike simulation** (`SpikeSchedule`) — spiky VMs are numbered 1, 2, 3 … in submission order:
+
+| Spiky VM | Spike window (from VM start) | During the spike |
 |---|---|---|
-| **SPIKY** | Performance host with peak headroom (First-Fit packs, Worst-Fit spreads) | Eco host with no other spiky VM and peak headroom |
-| **STABLE** | Eco host, Best-Fit (densest host that fits) | Performance host, only if peak headroom survives |
+| odd (1, 3, 5 …) | after 15 s, for 5 s | CPU = maxCpu, RAM usage = 90% |
+| even (2, 4, 6 …) | after 20 s, for 5 s | CPU = maxCpu, RAM usage = 90% |
 
-Each placement records the rule that chose it (`PERF_FIRST_FIT`, `ECO_BEST_FIT`,
-`SPIKY_OVERFLOW_ECO`, `STABLE_OVERFLOW_PERF`), shown as a tooltip on the Zone badge.
+With `sim.spike.repeat=true` the window recurs for as long as the VM runs.
 
-Implemented in [`ZonedVmAllocationPolicy.java`](backend/src/main/java/com/vmalloc/simulation/ZonedVmAllocationPolicy.java).
-The midsem rule (no two spiky VMs on one host, average demand only) remains available as `sim.policy=MIDSEM`.
+**3. Live migration** (`SpikeMigrationController`) — checked every simulated second:
+
+* **ANY** threshold crossed (CPU > 70%, RAM > 85%, demand > 3000 MIPS) while on an Eco host
+  → live-migrate to the first Performance host with room for the VM's current demand.
+* **ALL** thresholds back below while on a Performance host
+  → live-migrate back to the VM's original Eco host, or another Eco host with no spiky VM.
+
+Migrations use CloudSim's live migration: memory is copied at the target host's bandwidth
+(8 GB onto a 40 Gbps Performance host ≈ 1.6 s). Until a migration lands, the spike loads
+the Eco host, which is reported as overload time.
+
+The midsem rule (no zones, no migration) remains available as `sim.policy=MIDSEM`.
 
 ## Live Simulation API
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/simulation/sessions` | Body `{ "vms": [...], "timeScale": 120, "arrivalGapSeconds": 30 }` → `{ "sessionId" }` |
-| GET | `/api/simulation/sessions/{id}/stream` | `text/event-stream`: `init`, `placement`, `placement_failed`, `host_update`, then `completed` or `failed` |
+| POST | `/api/simulation/sessions` | Body `{ "vms": [...], "timeScale": 5, "arrivalGapSeconds": 5 }` → `{ "sessionId" }` |
+| GET | `/api/simulation/sessions/{id}/stream` | `text/event-stream`: `init`, `placement`, `placement_failed`, `spike`, `migration`, `host_update`, then `completed` or `failed` |
 | GET | `/api/simulation/sessions/{id}` | Status, plus the final result once finished |
 | POST | `/api/simulation/sessions/{id}/stop` | Stop a running session |
 
-`timeScale` is simulated seconds per real second (120 plays a one-hour run in 30 s).
+`timeScale` is simulated seconds per real second (5 makes each 5 s spike visible for about a second).
 Events carry ids, so a reconnecting client (`Last-Event-ID`) only receives what it missed.
 
 ## Configuration
@@ -169,13 +188,18 @@ All keys live in `backend/src/main/resources/application.properties`.
 | `ml.service.url` | `http://localhost:8000` | ML service URL |
 | `sim.policy` | `ZONED` | `ZONED` or `MIDSEM` |
 | `sim.host.count` | `10` | Total hosts (both zones) |
-| `sim.host.performance.count` | `3` | Performance Zone hosts (`0` = homogeneous Eco DC) |
-| `sim.host.performance.pes` / `.mips` / `.ram` | `4` / `5000` / `65536` | Per-host PEs, MIPS per PE, RAM (MB) |
+| `sim.host.performance.count` | `3` | Performance Zone hosts |
+| `sim.host.performance.pes` / `.mips` / `.ram` / `.bandwidth` | `4` / `5000` / `65536` / `40000` | Per-host PEs, MIPS per PE, RAM (MB), bandwidth (Mbps) |
 | `sim.host.performance.powerModel.maxWatts` / `.idleWatts` | `400` / `150` | Power model |
-| `sim.host.eco.pes` / `.mips` / `.ram` | `4` / `1000` / `32768` | Per-host PEs, MIPS per PE, RAM (MB) |
+| `sim.host.eco.pes` / `.mips` / `.ram` / `.bandwidth` | `4` / `1000` / `32768` / `10000` | Per-host PEs, MIPS per PE, RAM (MB), bandwidth (Mbps) |
 | `sim.host.eco.powerModel.maxWatts` / `.idleWatts` | `250` / `80` | Power model |
 | `sim.host.idlePolicy` | `POWER_OFF` | `POWER_OFF` (idle hosts draw 0 W) or `KEEP_IDLE` |
-| `sim.zone.performance.strategy` | `FIRST_FIT` | `FIRST_FIT` or `WORST_FIT` for spiky VMs |
-| `sim.zone.performance.maxSpikyPerHost` | `0` | Cap on spiky VMs per Performance host (`0` = peak headroom only) |
-| `sim.zone.allowSpikyOverflowToEco` | `true` | Overflow rule for spiky VMs |
-| `sim.zone.allowStableOverflowToPerf` | `true` | Overflow rule for stable VMs |
+| `sim.spike.repeat` | `true` | Repeat each VM's spike window while it runs |
+| `sim.spike.odd.afterSeconds` / `.durationSeconds` | `15` / `5` | Spike window of odd-numbered spiky VMs |
+| `sim.spike.even.afterSeconds` / `.durationSeconds` | `20` / `5` | Spike window of even-numbered spiky VMs |
+| `sim.spike.ramBaselinePercent` / `ramSpikePercent` | `50` / `90` | VM RAM usage outside / during a spike |
+| `sim.migration.enabled` | `true` | Live migration on/off (spikes are simulated either way) |
+| `sim.migration.cpuThresholdPercent` | `70` | VM CPU % that triggers migration (0 = off) |
+| `sim.migration.ramThresholdPercent` | `85` | VM RAM usage % that triggers migration (0 = off) |
+| `sim.migration.mipsThreshold` | `3000` | VM demand in MIPS that triggers migration (0 = off) |
+| `sim.migration.bandwidthPercent` | `1.0` | Share of target host bandwidth used to copy VM memory |

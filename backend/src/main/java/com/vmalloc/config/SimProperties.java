@@ -3,15 +3,15 @@ package com.vmalloc.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Datacenter and allocation settings bound from the {@code sim.*} keys in
+ * Datacenter, spike and migration settings bound from the {@code sim.*} keys in
  * application.properties.
  *
- * The datacenter is split into two zones:
+ * The datacenter is split into two decoupled zones:
+ *   Eco Zone         — standard hosts; EVERY VM is placed here first (at most one
+ *                      spiky VM per host, stable VMs best-fit up to capacity)
  *   Performance Zone — the first {@code sim.host.performance.count} hosts, high-MIPS,
- *                      reserved for SPIKY VMs with full peak headroom
- *   Eco Zone         — the remaining hosts, standard MIPS, densely packed with STABLE VMs
- *
- * Set {@code sim.host.performance.count=0} for a single homogeneous (all Eco) datacenter.
+ *                      empty at start; a spiky VM is live-migrated here while its load
+ *                      crosses a migration threshold, and back to Eco once it drops
  */
 @ConfigurationProperties(prefix = "sim")
 public class SimProperties {
@@ -21,33 +21,29 @@ public class SimProperties {
     /** POWER_OFF: hosts without VMs draw no power. KEEP_IDLE: every host draws at least idle power. */
     public enum IdlePolicy { POWER_OFF, KEEP_IDLE }
 
-    /** FIRST_FIT packs spiky VMs onto as few Performance hosts as possible; WORST_FIT spreads them. */
-    public enum PerformanceStrategy { FIRST_FIT, WORST_FIT }
-
     private PolicyType policy = PolicyType.ZONED;
     private final Hosts host = new Hosts();
-    private final ZoneRules zone = new ZoneRules();
+    private final Spike spike = new Spike();
+    private final Migration migration = new Migration();
 
     public PolicyType getPolicy() { return policy; }
     public void setPolicy(PolicyType policy) { this.policy = policy; }
     public Hosts getHost() { return host; }
-    public ZoneRules getZone() { return zone; }
+    public Spike getSpike() { return spike; }
+    public Migration getMigration() { return migration; }
 
     // ── sim.host.* ───────────────────────────────────────────────────────────
 
     public static class Hosts {
         /** Total hosts across both zones */
         private int count = 10;
-        private long bandwidth = 10_000;
         private long storage = 1_000_000;
         private IdlePolicy idlePolicy = IdlePolicy.POWER_OFF;
-        private final HostClass performance = new HostClass(3, 4, 5000, 65_536, 400, 150);
-        private final HostClass eco = new HostClass(0, 4, 1000, 32_768, 250, 80);
+        private final HostClass performance = new HostClass(3, 4, 5000, 65_536, 40_000, 400, 150);
+        private final HostClass eco = new HostClass(0, 4, 1000, 32_768, 10_000, 250, 80);
 
         public int getCount() { return count; }
         public void setCount(int count) { this.count = count; }
-        public long getBandwidth() { return bandwidth; }
-        public void setBandwidth(long bandwidth) { this.bandwidth = bandwidth; }
         public long getStorage() { return storage; }
         public void setStorage(long storage) { this.storage = storage; }
         public IdlePolicy getIdlePolicy() { return idlePolicy; }
@@ -71,13 +67,16 @@ public class SimProperties {
         /** MIPS per PE */
         private long mips;
         private long ram;
+        /** Mbps; also sets how fast VMs live-migrate onto the host */
+        private long bandwidth;
         private final PowerModel powerModel = new PowerModel();
 
-        HostClass(int count, int pes, long mips, long ram, double maxWatts, double idleWatts) {
+        HostClass(int count, int pes, long mips, long ram, long bandwidth, double maxWatts, double idleWatts) {
             this.count = count;
             this.pes = pes;
             this.mips = mips;
             this.ram = ram;
+            this.bandwidth = bandwidth;
             powerModel.setMaxWatts(maxWatts);
             powerModel.setIdleWatts(idleWatts);
         }
@@ -90,6 +89,8 @@ public class SimProperties {
         public void setMips(long mips) { this.mips = mips; }
         public long getRam() { return ram; }
         public void setRam(long ram) { this.ram = ram; }
+        public long getBandwidth() { return bandwidth; }
+        public void setBandwidth(long bandwidth) { this.bandwidth = bandwidth; }
         public PowerModel getPowerModel() { return powerModel; }
     }
 
@@ -104,30 +105,76 @@ public class SimProperties {
         public void setIdleWatts(double idleWatts) { this.idleWatts = idleWatts; }
     }
 
-    // ── sim.zone.* ───────────────────────────────────────────────────────────
+    // ── sim.spike.* ──────────────────────────────────────────────────────────
 
-    public static class ZoneRules {
-        private final PerformanceRules performance = new PerformanceRules();
-        /** Place a SPIKY VM on an Eco host (alone, with peak headroom) when the Performance Zone is full */
-        private boolean allowSpikyOverflowToEco = true;
-        /** Place a STABLE VM on a Performance host when the Eco Zone is full, if spiky peak headroom survives */
-        private boolean allowStableOverflowToPerf = true;
+    /**
+     * Simulated spikes of SPIKY VMs, numbered 1, 2, 3 … in submission order.
+     * Odd-numbered VMs spike {@code odd.afterSeconds} after they start, for
+     * {@code odd.durationSeconds}; even-numbered ones use the {@code even} window.
+     * With {@code repeat} the window recurs (after + duration seconds per cycle).
+     *
+     * During a spike CPU rises from avgCpu to maxCpu and RAM usage from
+     * {@code ramBaselinePercent} to {@code ramSpikePercent} of the VM's RAM.
+     */
+    public static class Spike {
+        private boolean repeat = true;
+        private final SpikeWindow odd = new SpikeWindow(15, 5);
+        private final SpikeWindow even = new SpikeWindow(20, 5);
+        private double ramBaselinePercent = 50;
+        private double ramSpikePercent = 90;
 
-        public PerformanceRules getPerformance() { return performance; }
-        public boolean isAllowSpikyOverflowToEco() { return allowSpikyOverflowToEco; }
-        public void setAllowSpikyOverflowToEco(boolean v) { this.allowSpikyOverflowToEco = v; }
-        public boolean isAllowStableOverflowToPerf() { return allowStableOverflowToPerf; }
-        public void setAllowStableOverflowToPerf(boolean v) { this.allowStableOverflowToPerf = v; }
+        public boolean isRepeat() { return repeat; }
+        public void setRepeat(boolean repeat) { this.repeat = repeat; }
+        public SpikeWindow getOdd() { return odd; }
+        public SpikeWindow getEven() { return even; }
+        public double getRamBaselinePercent() { return ramBaselinePercent; }
+        public void setRamBaselinePercent(double v) { this.ramBaselinePercent = v; }
+        public double getRamSpikePercent() { return ramSpikePercent; }
+        public void setRamSpikePercent(double v) { this.ramSpikePercent = v; }
     }
 
-    public static class PerformanceRules {
-        private PerformanceStrategy strategy = PerformanceStrategy.FIRST_FIT;
-        /** Upper bound on spiky VMs per Performance host; 0 = limited only by peak headroom */
-        private int maxSpikyPerHost = 0;
+    public static class SpikeWindow {
+        private double afterSeconds;
+        private double durationSeconds;
 
-        public PerformanceStrategy getStrategy() { return strategy; }
-        public void setStrategy(PerformanceStrategy strategy) { this.strategy = strategy; }
-        public int getMaxSpikyPerHost() { return maxSpikyPerHost; }
-        public void setMaxSpikyPerHost(int maxSpikyPerHost) { this.maxSpikyPerHost = maxSpikyPerHost; }
+        SpikeWindow(double afterSeconds, double durationSeconds) {
+            this.afterSeconds = afterSeconds;
+            this.durationSeconds = durationSeconds;
+        }
+
+        public double getAfterSeconds() { return afterSeconds; }
+        public void setAfterSeconds(double afterSeconds) { this.afterSeconds = afterSeconds; }
+        public double getDurationSeconds() { return durationSeconds; }
+        public void setDurationSeconds(double durationSeconds) { this.durationSeconds = durationSeconds; }
+    }
+
+    // ── sim.migration.* ──────────────────────────────────────────────────────
+
+    /**
+     * A spiky VM is migrated to the Performance Zone when ANY threshold is crossed,
+     * and back to the Eco Zone when ALL are below again. A threshold of 0 is disabled.
+     * Migration runs with the ZONED policy only.
+     */
+    public static class Migration {
+        private boolean enabled = true;
+        /** VM CPU utilisation (% of its mips × cores) */
+        private double cpuThresholdPercent = 70;
+        /** VM RAM usage (% of its allocated RAM) */
+        private double ramThresholdPercent = 85;
+        /** VM CPU demand in MIPS */
+        private double mipsThreshold = 3000;
+        /** Share of the target host's bandwidth used to copy VM memory */
+        private double bandwidthPercent = 1.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public double getCpuThresholdPercent() { return cpuThresholdPercent; }
+        public void setCpuThresholdPercent(double v) { this.cpuThresholdPercent = v; }
+        public double getRamThresholdPercent() { return ramThresholdPercent; }
+        public void setRamThresholdPercent(double v) { this.ramThresholdPercent = v; }
+        public double getMipsThreshold() { return mipsThreshold; }
+        public void setMipsThreshold(double mipsThreshold) { this.mipsThreshold = mipsThreshold; }
+        public double getBandwidthPercent() { return bandwidthPercent; }
+        public void setBandwidthPercent(double bandwidthPercent) { this.bandwidthPercent = bandwidthPercent; }
     }
 }

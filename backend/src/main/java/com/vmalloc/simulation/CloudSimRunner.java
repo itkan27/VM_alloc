@@ -27,13 +27,14 @@ import java.util.stream.IntStream;
 /**
  * CloudSimRunner
  * ──────────────
- * Builds a zoned CloudSim Plus datacenter, submits classified VMs and runs either
+ * Builds a zoned CloudSim Plus datacenter, places classified VMs in the Eco Zone,
+ * simulates the spikes of SPIKY VMs and live-migrates them between zones. Runs either
  *   • a one-shot batch simulation ({@link #run}), or
- *   • a live simulation paced against the wall clock that reports every placement
- *     and periodic host snapshots to a {@link SimulationObserver} ({@link #runLive}).
+ *   • a live simulation paced against the wall clock that reports placements, spikes,
+ *     migrations and periodic host snapshots to a {@link SimulationObserver} ({@link #runLive}).
  *
- * Datacenter layout and policy come from {@link SimProperties} (sim.* keys):
- *   hosts 0 … performance.count-1  → Performance Zone
+ * Datacenter layout comes from {@link SimProperties} (sim.* keys):
+ *   hosts 0 … performance.count-1  → Performance Zone (empty until a VM spikes)
  *   remaining hosts                → Eco Zone
  */
 @Component
@@ -61,11 +62,11 @@ public class CloudSimRunner {
             CloudSimPlus simulation,
             TrackedAllocationPolicy policy,
             List<Host> hosts,
-            EnergyAccountant energy,
+            HostMonitor monitor,
+            SpikeMigrationController controller,
             List<VmRequest> requests,
             List<ClassificationResult> classifications,
             List<VmSimple> vms,
-            List<CloudletSimple> cloudlets,
             List<VmProfile> profiles
     ) {}
 
@@ -82,7 +83,8 @@ public class CloudSimRunner {
 
         SimRun run = prepare(requests, classifications, 0.0);
         run.simulation().start();
-        log.info("Simulation finished. Clock: {} seconds.", run.simulation().clock());
+        log.info("Simulation finished. Clock: {} seconds, {} migrations.",
+                run.simulation().clock(), run.controller().getMigrations().size());
         return buildResult(run);
     }
 
@@ -102,6 +104,7 @@ public class CloudSimRunner {
 
         SimRun run = prepare(requests, classifications, options.arrivalGapSeconds());
         CloudSimPlus simulation = run.simulation();
+        run.controller().setListener(observer);
 
         Map<Vm, Integer> indexOf = new IdentityHashMap<>();
         for (int i = 0; i < run.vms().size(); i++) indexOf.put(run.vms().get(i), i);
@@ -112,7 +115,7 @@ public class CloudSimRunner {
             observer.onPlacement(new PlacementEvent(
                     profile.vmId(), vm.getId(), cls.vmType(), cls.confidence(),
                     host.getId(), "Host-" + host.getId(), placement.zone(), placement.reason(),
-                    profile.avgDemandMips(), profile.peakDemandMips(), true,
+                    profile.avgDemandMips(), profile.peakDemandMips(), 0, true,
                     snapshot(run, host), simulation.clock()));
         });
 
@@ -154,7 +157,8 @@ public class CloudSimRunner {
             }
         }
         observer.onHostUpdate(new HostUpdateEvent(simulation.clock(), snapshots(run)));
-        log.info("Live simulation finished. Clock: {} seconds.", simulation.clock());
+        log.info("Live simulation finished. Clock: {} seconds, {} migrations.",
+                simulation.clock(), run.controller().getMigrations().size());
 
         return buildResult(run);
     }
@@ -178,9 +182,7 @@ public class CloudSimRunner {
         List<Host> hosts = buildHosts(policy);
         var datacenter = new DatacenterSimple(simulation, hosts, policy);
         datacenter.setSchedulingInterval(1);
-
-        var energy = new EnergyAccountant(hosts, policy.getLedger(), props.getHost().getIdlePolicy());
-        energy.attach(simulation);
+        datacenter.setBandwidthPercentForMigration(props.getMigration().getBandwidthPercent());
 
         // ── 3. Broker ────────────────────────────────────────────────────────
         // Destroy each VM 1 s after its cloudlet finishes, so its host capacity
@@ -191,10 +193,10 @@ public class CloudSimRunner {
         // ── 4. Create CloudSim VMs & cloudlets ───────────────────────────────
         // Every CloudSim VM is sized to the average demand the policy budgets, split
         // into PEs small enough for any host's PE grid. CloudSim's reservation then
-        // never exceeds what the policy checked, and CloudSim's host utilisation
-        // equals the reported avg-demand utilisation. MIPS per PE is rounded down to
-        // a whole number because CloudSim truncates VM MIPS, and a cloudlet sized
-        // from fractional MIPS never completes.
+        // never exceeds what the policy checked. MIPS per PE is rounded down to a
+        // whole number because CloudSim truncates VM MIPS, and a cloudlet sized from
+        // fractional MIPS never completes. Spikes above the average are simulated by
+        // the SpikeMigrationController on top of CloudSim.
         double minPeMips = hosts.stream()
                 .flatMap(h -> h.getPeList().stream())
                 .mapToDouble(Pe::getCapacity)
@@ -208,11 +210,13 @@ public class CloudSimRunner {
         List<CloudletSimple> cloudlets = new ArrayList<>();
         List<VmProfile> profiles = new ArrayList<>();
         double lastEventTime = 0;
+        int spikyCount = 0;
 
         for (int i = 0; i < requests.size(); i++) {
             VmRequest req = requests.get(i);
             ClassificationResult cls = classificationOf(req, classifications);
-            VmProfile profile = VmProfile.of(req, cls.vmType());
+            if (cls.vmType() == VmType.SPIKY) spikyCount++;
+            VmProfile profile = VmProfile.of(req, cls.vmType(), spikyCount);
 
             double demand = Math.max(profile.avgDemandMips(), 1.0);
             int vmPes = (int) Math.min(minHostPes, Math.max(1, Math.ceil(demand / minPeMips)));
@@ -246,11 +250,23 @@ public class CloudSimRunner {
             profiles.add(profile);
         }
 
-        // Safety guard: end a run that stalls well past its last expected event
-        // instead of blocking the calling thread forever
+        // ── 5. Spike simulation, migration and host monitoring ───────────────
+        ZonedVmAllocationPolicy migrationPolicy =
+                policy instanceof ZonedVmAllocationPolicy zoned && props.getMigration().isEnabled() ? zoned : null;
+        var controller = new SpikeMigrationController(policy, migrationPolicy, datacenter,
+                new SpikeSchedule(props.getSpike()), props.getMigration(), vms);
+        var monitor = new HostMonitor(hosts, policy.getLedger(), props.getHost().getIdlePolicy());
+
+        // Each tick: charge the elapsed interval, update VM loads (and migrate), then
+        // capture the new host state. A run that stalls well past its last expected
+        // event is terminated instead of blocking the calling thread forever.
         double guardTime = 2 * lastEventTime + 60;
         simulation.addOnClockTickListener(info -> {
-            if (info.getTime() > guardTime && simulation.isRunning()) {
+            double now = info.getTime();
+            monitor.integrate(now);
+            controller.onTick(now);
+            monitor.sample();
+            if (now > guardTime && simulation.isRunning()) {
                 log.warn("Simulation passed {} s without finishing; terminating.", guardTime);
                 simulation.terminate();
             }
@@ -259,13 +275,13 @@ public class CloudSimRunner {
         broker.submitVmList(vms);
         broker.submitCloudletList(cloudlets);
 
-        return new SimRun(simulation, policy, hosts, energy,
-                requests, classList, vms, cloudlets, profiles);
+        return new SimRun(simulation, policy, hosts, monitor, controller,
+                requests, classList, vms, profiles);
     }
 
     private TrackedAllocationPolicy createPolicy() {
         return switch (props.getPolicy()) {
-            case ZONED -> new ZonedVmAllocationPolicy(props.getZone());
+            case ZONED -> new ZonedVmAllocationPolicy();
             case MIDSEM -> new MidsemVmAllocationPolicy();
         };
     }
@@ -282,7 +298,7 @@ public class CloudSimRunner {
             List<Pe> pes = IntStream.range(0, spec.getPes())
                     .mapToObj(j -> (Pe) new PeSimple(spec.getMips()))
                     .toList();
-            var host = new HostSimple(spec.getRam(), cfg.getBandwidth(), cfg.getStorage(), pes);
+            var host = new HostSimple(spec.getRam(), spec.getBandwidth(), cfg.getStorage(), pes);
             host.setVmScheduler(new VmSchedulerTimeShared());
             host.setPowerModel(new PowerModelHostSimple(
                     spec.getPowerModel().getMaxWatts(), spec.getPowerModel().getIdleWatts()));
@@ -326,11 +342,11 @@ public class CloudSimRunner {
                 run.policy().zoneOf(host),
                 vms > 0,
                 host.getTotalMipsCapacity(),
-                ledger.cpuUtilization(host),
-                ledger.guaranteedMips(host),
+                ledger.currentLoad(host),
                 vms,
                 spiky,
-                vms - spiky);
+                vms - spiky,
+                ledger.vmsOn(host).stream().map(VmProfile::vmId).sorted().toList());
     }
 
     // ── Results ──────────────────────────────────────────────────────────────
@@ -338,37 +354,33 @@ public class CloudSimRunner {
     private SimulationResult buildResult(SimRun run) {
         List<VmRequest> requests = run.requests();
         List<VmSimple> vms = run.vms();
-        List<CloudletSimple> cloudlets = run.cloudlets();
         List<VmProfile> profiles = run.profiles();
         TrackedAllocationPolicy policy = run.policy();
+        HostMonitor monitor = run.monitor();
+        List<MigrationEvent> migrations = run.controller().getMigrations();
 
         // ── Per-VM placement results ─────────────────────────────────────────
         List<VmPlacementResult> placements = new ArrayList<>();
-        Map<Host, List<Integer>> hostToVmIndexes = new IdentityHashMap<>();
-
         for (int i = 0; i < requests.size(); i++) {
-            VmRequest req = requests.get(i);
             VmSimple vm = vms.get(i);
             VmProfile profile = profiles.get(i);
             ClassificationResult cls = run.classifications().get(i);
             Optional<TrackedAllocationPolicy.Placement> placement = policy.placementOf(vm);
-
-            boolean placed = placement.isPresent() && vm.getHost() != Host.NULL;
-            if (placed) {
-                hostToVmIndexes.computeIfAbsent(vm.getHost(), k -> new ArrayList<>()).add(i);
-            }
+            Host host = placement.map(TrackedAllocationPolicy.Placement::host).orElse(Host.NULL);
+            boolean placed = placement.isPresent();
 
             placements.add(new VmPlacementResult(
-                    req.vmId(),
+                    requests.get(i).vmId(),
                     vm.getId(),
                     cls.vmType(),
                     cls.confidence(),
-                    placed ? vm.getHost().getId() : -1L,
-                    placed ? "Host-" + vm.getHost().getId() : "Unallocated",
+                    placed ? host.getId() : -1L,
+                    placed ? "Host-" + host.getId() : "Unallocated",
                     placement.map(TrackedAllocationPolicy.Placement::zone).orElse(null),
                     placement.map(TrackedAllocationPolicy.Placement::reason).orElse(null),
                     profile.avgDemandMips(),
                     profile.peakDemandMips(),
+                    run.controller().migrationCount(vm),
                     placed
             ));
         }
@@ -376,38 +388,27 @@ public class CloudSimRunner {
         // ── Per-host metrics (all hosts, in host order) ──────────────────────
         List<HostMetric> hostMetrics = new ArrayList<>();
         for (Host host : run.hosts()) {
-            List<Integer> idx = hostToVmIndexes.getOrDefault(host, List.of());
+            Collection<VmProfile> seen = monitor.seenVms(host);
+            int spiky = (int) seen.stream().filter(VmProfile::isSpiky).count();
+            int in = (int) migrations.stream().filter(m -> m.toHostId() == host.getId()).count();
+            int out = (int) migrations.stream().filter(m -> m.fromHostId() == host.getId()).count();
 
-            double avgDemand = 0, peakDemand = 0;
-            int spiky = 0;
-            double firstStart = Double.MAX_VALUE, lastFinish = 0;
-            for (int i : idx) {
-                VmProfile p = profiles.get(i);
-                avgDemand += p.avgDemandMips();
-                peakDemand += p.guaranteedMips();
-                if (p.isSpiky()) spiky++;
-
-                CloudletSimple cl = cloudlets.get(i);
-                if (cl.isFinished()) {
-                    firstStart = Math.min(firstStart, cl.getExecStartTime());
-                    lastFinish = Math.max(lastFinish, cl.getFinishTime());
-                }
-            }
-
-            double capacity = host.getTotalMipsCapacity();
             hostMetrics.add(new HostMetric(
                     host.getId(),
                     "Host-" + host.getId(),
                     policy.zoneOf(host),
-                    !idx.isEmpty(),
-                    capacity,
-                    Math.min(avgDemand / capacity, 1.0),
-                    peakDemand,
-                    idx.size(),
+                    !seen.isEmpty(),
+                    host.getTotalMipsCapacity(),
+                    monitor.avgUtilization(host),
+                    monitor.maxLoad(host),
+                    seen.size(),
                     spiky,
-                    idx.size() - spiky,
-                    lastFinish > 0 ? lastFinish - firstStart : 0.0,
-                    run.energy().energyKWh(host)
+                    seen.size() - spiky,
+                    monitor.activeSeconds(host),
+                    monitor.overloadSeconds(host),
+                    in,
+                    out,
+                    monitor.energyKWh(host)
             ));
         }
 
@@ -415,12 +416,6 @@ public class CloudSimRunner {
         List<HostMetric> active = hostMetrics.stream().filter(HostMetric::active).toList();
         int spikyTotal = (int) profiles.stream().filter(VmProfile::isSpiky).count();
         int failed = (int) placements.stream().filter(p -> !p.allocationSuccess()).count();
-        int overflow = (int) placements.stream()
-                .filter(p -> ZonedVmAllocationPolicy.SPIKY_OVERFLOW_ECO.equals(p.placementReason()))
-                .count();
-        int peakOverload = (int) active.stream()
-                .filter(h -> h.peakDemandMips() > h.capacityMips() + 1e-9)
-                .count();
 
         SimulationSummary summary = new SimulationSummary(
                 requests.size(),
@@ -430,13 +425,14 @@ public class CloudSimRunner {
                 (int) active.stream().filter(h -> h.zone() == Zone.PERFORMANCE).count(),
                 (int) active.stream().filter(h -> h.zone() == Zone.ECO).count(),
                 failed,
-                overflow,
-                peakOverload,
+                migrations.size(),
+                run.controller().getSpikes(),
+                hostMetrics.stream().mapToDouble(HostMetric::overloadSeconds).sum(),
                 active.stream().mapToDouble(HostMetric::cpuUtilization).average().orElse(0.0),
                 active.stream().mapToDouble(HostMetric::activeSeconds).average().orElse(0.0),
-                run.energy().totalEnergyKWh()
+                monitor.totalEnergyKWh()
         );
 
-        return new SimulationResult(placements, hostMetrics, summary);
+        return new SimulationResult(placements, hostMetrics, migrations, summary);
     }
 }

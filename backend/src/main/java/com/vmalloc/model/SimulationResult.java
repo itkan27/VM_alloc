@@ -8,5 +8,6 @@ import java.util.List;
 public record SimulationResult(
         List<VmPlacementResult> placements,
         List<HostMetric> hostMetrics,
+        List<MigrationEvent> migrations,
         SimulationSummary summary
 ) {}

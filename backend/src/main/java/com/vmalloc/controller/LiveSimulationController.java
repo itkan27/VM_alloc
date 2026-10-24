@@ -43,7 +43,7 @@ public class LiveSimulationController {
 
     /**
      * Request body:
-     * { "vms": [ { "vmId": "vm-001", ... } ], "timeScale": 120, "arrivalGapSeconds": 30 }
+     * { "vms": [ { "vmId": "vm-001", ... } ], "timeScale": 5, "arrivalGapSeconds": 5 }
      */
     @PostMapping
     public ResponseEntity<Map<String, String>> start(@Valid @RequestBody LiveSimulationRequest request) {

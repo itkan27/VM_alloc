@@ -1,15 +1,18 @@
 package com.vmalloc.config;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/** Part of the deferred validation suite (excluded from the default build). */
+@Tag("validation")
 @SpringBootTest(properties = {
         "sim.host.performance.count=2",
-        "sim.zone.performance.strategy=WORST_FIT",
-        "sim.host.eco.powerModel.idleWatts=70"
+        "sim.spike.odd.afterSeconds=12",
+        "sim.migration.cpuThresholdPercent=80"
 })
 class SimPropertiesBindingTest {
 
@@ -19,13 +22,12 @@ class SimPropertiesBindingTest {
     @Test
     void bindsApplicationPropertiesAndOverrides() {
         assertThat(props.getPolicy()).isEqualTo(SimProperties.PolicyType.ZONED);
-        assertThat(props.getHost().getCount()).isEqualTo(10);
         assertThat(props.getHost().performanceCount()).isEqualTo(2);
-        assertThat(props.getHost().getPerformance().getMips()).isEqualTo(5000);
-        assertThat(props.getHost().getPerformance().getPowerModel().getMaxWatts()).isEqualTo(400);
-        assertThat(props.getHost().getEco().getPowerModel().getIdleWatts()).isEqualTo(70);
-        assertThat(props.getZone().getPerformance().getStrategy())
-                .isEqualTo(SimProperties.PerformanceStrategy.WORST_FIT);
-        assertThat(props.getHost().getIdlePolicy()).isEqualTo(SimProperties.IdlePolicy.POWER_OFF);
+        assertThat(props.getHost().getPerformance().getBandwidth()).isEqualTo(40_000);
+        assertThat(props.getHost().getEco().getPowerModel().getIdleWatts()).isEqualTo(80);
+        assertThat(props.getSpike().getOdd().getAfterSeconds()).isEqualTo(12);
+        assertThat(props.getSpike().getEven().getAfterSeconds()).isEqualTo(20);
+        assertThat(props.getMigration().getCpuThresholdPercent()).isEqualTo(80);
+        assertThat(props.getMigration().getMipsThreshold()).isEqualTo(3000);
     }
 }

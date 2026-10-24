@@ -7,12 +7,16 @@ import com.vmalloc.model.PlacementFailedEvent;
 
 import java.util.List;
 
-/** Receives progress from a live simulation run (called on the simulation thread). */
-public interface SimulationObserver {
+/**
+ * Receives progress from a live simulation run (called on the simulation thread).
+ * Spike and migration events arrive through the inherited listener methods.
+ */
+public interface SimulationObserver extends SpikeMigrationController.Listener {
 
     /** Datacenter topology before any VM arrives */
     void onInit(List<HostSnapshot> hosts);
 
+    /** A VM's initial placement */
     void onPlacement(PlacementEvent event);
 
     void onPlacementFailed(PlacementFailedEvent event);

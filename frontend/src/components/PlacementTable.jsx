@@ -1,19 +1,17 @@
 const REASON_LABELS = {
-  PERF_FIRST_FIT: 'Performance Zone, first host with peak headroom',
-  PERF_WORST_FIT: 'Performance Zone, host with the most headroom',
-  SPIKY_OVERFLOW_ECO: 'Performance Zone full: isolated on an Eco host with peak headroom',
+  ECO_SPIKY_FIRST_FIT: 'Eco Zone, first host with capacity and no other spiky VM',
   ECO_BEST_FIT: 'Eco Zone, best-fit (densest host that fits)',
-  STABLE_OVERFLOW_PERF: 'Eco Zone full: placed on a Performance host without breaking peak headroom',
   SPIKY_FIRST_FIT: 'First host with capacity and no other spiky VM',
   STABLE_BEST_FIT: 'Best-fit (densest host that fits)',
 };
 
 /**
  * PlacementTable
- * Shows every VM placement result: ID, type badge, confidence, zone, host, status.
- * New rows fade in, so live placements appear one by one.
+ * Shows every VM placement result: ID, type badge, confidence, initial zone and host,
+ * migrations and status. In live mode it also shows where each VM runs now and
+ * whether it is spiking. New rows fade in, so live placements appear one by one.
  */
-export default function PlacementTable({ placements }) {
+export default function PlacementTable({ placements, live = null }) {
   if (!placements || placements.length === 0) {
     return (
       <div className="empty-state">
@@ -32,8 +30,10 @@ export default function PlacementTable({ placements }) {
             <th>CloudSim ID</th>
             <th>Type</th>
             <th>Confidence</th>
-            <th>Zone</th>
-            <th>Host</th>
+            <th>Initial Zone</th>
+            <th>Initial Host</th>
+            {live && <th>Now</th>}
+            <th>Migrations</th>
             <th>Status</th>
           </tr>
         </thead>
@@ -78,7 +78,6 @@ export default function PlacementTable({ placements }) {
                     title={REASON_LABELS[p.placementReason] || p.placementReason}
                   >
                     {p.zone === 'PERFORMANCE' ? 'Performance' : 'Eco'}
-                    {p.placementReason?.includes('OVERFLOW') ? ' ↪' : ''}
                   </span>
                 ) : (
                   <span style={{ color: 'var(--text-muted)' }}>—</span>
@@ -92,6 +91,20 @@ export default function PlacementTable({ placements }) {
                 ) : (
                   <span style={{ color: 'var(--text-muted)' }}>—</span>
                 )}
+              </td>
+              {live && (
+                <td>
+                  {live.location[p.vmId] ? (
+                    <span className={`badge badge-${live.location[p.vmId].zone === 'PERFORMANCE' ? 'perf' : 'eco'}`}>
+                      {live.spiking[p.vmId] ? '⚡ ' : ''}{live.location[p.vmId].hostName}
+                    </span>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>—</span>
+                  )}
+                </td>
+              )}
+              <td className="mono" style={{ color: p.migrationCount ? 'var(--accent-spiky)' : 'var(--text-muted)' }}>
+                {p.migrationCount || 0}
               </td>
               <td>
                 <span className={`badge badge-${p.allocationSuccess ? 'success' : 'danger'}`}>

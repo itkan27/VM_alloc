@@ -1,7 +1,7 @@
 package com.vmalloc.model;
 
 /**
- * Streamed when a VM is confirmed on a host. Carries the same fields as
+ * Streamed when a VM is first placed on a host. Carries the same fields as
  * {@link VmPlacementResult} plus the host's state right after the placement.
  */
 public record PlacementEvent(
@@ -15,6 +15,7 @@ public record PlacementEvent(
         String placementReason,
         double cpuDemandMips,
         double peakDemandMips,
+        int migrationCount,
         boolean allocationSuccess,
         HostSnapshot host,
         double simTime

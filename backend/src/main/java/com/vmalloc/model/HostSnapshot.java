@@ -1,5 +1,7 @@
 package com.vmalloc.model;
 
+import java.util.List;
+
 /**
  * Live state of one host during a streamed simulation (VMs currently running on it).
  */
@@ -10,13 +12,13 @@ public record HostSnapshot(
         boolean active,
         double capacityMips,
 
-        /** Fraction of total MIPS consumed by average VM demand (0.0 – 1.0) */
+        /** Current demand ÷ capacity; above 1.0 means the host is overloaded */
         double cpuUtilization,
-
-        /** Σ peak of spiky VMs + Σ avg of stable VMs */
-        double peakDemandMips,
 
         int totalVms,
         int spikyVms,
-        int stableVms
+        int stableVms,
+
+        /** IDs of the VMs currently on the host */
+        List<String> vmIds
 ) {}

@@ -11,9 +11,9 @@ import java.util.List;
 /**
  * Request body for starting a live (streamed) simulation.
  *
- *   timeScale         — simulated seconds per wall-clock second (default 120:
- *                       a one-hour run plays back in 30 s)
- *   arrivalGapSeconds — simulated seconds between consecutive VM arrivals (default 30)
+ *   timeScale         — simulated seconds per wall-clock second (default 5, so a
+ *                       5 s spike is visible for about a second)
+ *   arrivalGapSeconds — simulated seconds between consecutive VM arrivals (default 5)
  */
 public record LiveSimulationRequest(
 
@@ -26,8 +26,8 @@ public record LiveSimulationRequest(
         @PositiveOrZero @DecimalMax("86400")
         Double arrivalGapSeconds
 ) {
-    public static final double DEFAULT_TIME_SCALE = 120.0;
-    public static final double DEFAULT_ARRIVAL_GAP_SECONDS = 30.0;
+    public static final double DEFAULT_TIME_SCALE = 5.0;
+    public static final double DEFAULT_ARRIVAL_GAP_SECONDS = 5.0;
 
     public double timeScaleOrDefault() {
         return timeScale != null ? timeScale : DEFAULT_TIME_SCALE;

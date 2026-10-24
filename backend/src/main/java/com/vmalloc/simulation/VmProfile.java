@@ -4,40 +4,47 @@ import com.vmalloc.model.VmRequest;
 import com.vmalloc.model.VmType;
 
 /**
- * Everything the allocation policies need to know about one VM.
+ * Everything the allocation policies and the spike simulation need to know about one VM.
  *
- *   avgDemandMips  = avgCpu% × mips × cores   (sustained load)
- *   peakDemandMips = maxCpu% × mips × cores   (load during a spike)
+ *   capacityMips   = mips × cores
+ *   avgDemandMips  = avgCpu% × capacityMips   (sustained load)
+ *   peakDemandMips = maxCpu% × capacityMips   (load during a spike)
+ *
+ * {@code spikeNumber} is the VM's 1-based position among SPIKY VMs in submission
+ * order (0 for STABLE VMs); odd and even numbers spike on different schedules.
  */
 public record VmProfile(
         String vmId,
         VmType type,
-        double avgDemandMips,
-        double peakDemandMips,
+        double capacityMips,
+        double avgCpuPercent,
+        double maxCpuPercent,
         long ram,
-        long bw
+        long bw,
+        int spikeNumber
 ) {
 
-    public static VmProfile of(VmRequest req, VmType type) {
-        double totalMips = (double) req.mips() * req.numCores();
+    public static VmProfile of(VmRequest req, VmType type, int spikeNumber) {
         return new VmProfile(
                 req.vmId(),
                 type,
-                totalMips * (req.avgCpu() / 100.0),
-                totalMips * (req.maxCpu() / 100.0),
+                (double) req.mips() * req.numCores(),
+                req.avgCpu(),
+                req.maxCpu(),
                 req.ram(),
-                req.bandwidth());
+                req.bandwidth(),
+                type == VmType.SPIKY ? spikeNumber : 0);
     }
 
     public boolean isSpiky() {
         return type == VmType.SPIKY;
     }
 
-    /**
-     * MIPS a host must hold in reserve for this VM so a spike never overloads it:
-     * the peak for SPIKY VMs, the average for STABLE ones.
-     */
-    public double guaranteedMips() {
-        return isSpiky() ? peakDemandMips : avgDemandMips;
+    public double avgDemandMips() {
+        return capacityMips * avgCpuPercent / 100.0;
+    }
+
+    public double peakDemandMips() {
+        return capacityMips * maxCpuPercent / 100.0;
     }
 }

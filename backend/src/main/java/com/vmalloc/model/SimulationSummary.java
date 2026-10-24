@@ -10,16 +10,19 @@ public record SimulationSummary(
         int ecoHostsUsed,
         int failedAllocations,
 
-        /** Spiky VMs placed in the Eco Zone because the Performance Zone was full */
-        int spikyOverflowCount,
+        /** Completed live migrations (both directions) */
+        int migrations,
 
-        /** Hosts that would be overloaded if all their spiky VMs spiked at once */
-        int peakOverloadHosts,
+        /** Simulated spikes that started */
+        int spikes,
 
-        /** Mean CPU utilisation across active hosts (0.0 – 1.0) */
+        /** Σ over hosts of seconds spent overloaded (demand > capacity) */
+        double overloadHostSeconds,
+
+        /** Mean of the active hosts' time-averaged CPU utilisation (0.0 – 1.0) */
         double avgCpuUtilization,
 
-        /** Mean measured active time across active hosts (seconds) */
+        /** Mean active time across active hosts (seconds) */
         double avgHostActiveSeconds,
 
         double totalEnergyKWh

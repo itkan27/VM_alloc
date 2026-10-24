@@ -1,7 +1,7 @@
 package com.vmalloc.model;
 
 /**
- * CPU, VM-count and energy metrics for a single host after simulation.
+ * CPU, VM-count, migration and energy metrics for a single host over the whole run.
  */
 public record HostMetric(
         long hostId,
@@ -14,18 +14,24 @@ public record HostMetric(
         /** Total host capacity in MIPS (pes × mips_per_pe) */
         double capacityMips,
 
-        /** Fraction of total MIPS consumed by average VM demand (0.0 – 1.0) */
+        /** Time-averaged CPU utilisation while the host had VMs (0.0 – 1.0) */
         double cpuUtilization,
 
-        /** Σ peak of spiky VMs + Σ avg of stable VMs: demand if every spiky VM spikes at once */
-        double peakDemandMips,
+        /** Highest demand ÷ capacity seen; above 1.0 means the host was overloaded */
+        double maxCpuUtilization,
 
+        /** Distinct VMs that ran on the host */
         int totalVms,
         int spikyVms,
         int stableVms,
 
-        /** Measured time from the first VM starting to the last VM finishing (seconds) */
+        /** Simulated seconds the host had at least one VM */
         double activeSeconds,
 
+        /** Simulated seconds the host's demand exceeded its capacity */
+        double overloadSeconds,
+
+        int migrationsIn,
+        int migrationsOut,
         double energyKWh
 ) {}
