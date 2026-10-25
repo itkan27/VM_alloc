@@ -302,14 +302,15 @@ public class CloudSimRunner {
                 requests, classList, vms, profiles);
     }
 
+    // Plain comparisons instead of an enum switch: javac compiles an enum switch into a
+    // synthetic CloudSimRunner$1 class that other compilers (e.g. an IDE's) do not
+    // generate, so mixed builds failed with NoClassDefFoundError
     private TrackedAllocationPolicy createPolicy(SimProperties.PolicyType type) {
-        return switch (type) {
-            case ZONED -> new ZonedVmAllocationPolicy();
-            case MIDSEM -> new MidsemVmAllocationPolicy();
-            case ARA -> new AraVmAllocationPolicy(props.getAra());
-            case FIRST_FIT -> new FirstFitVmAllocationPolicy();
-            case BEST_FIT -> new BestFitVmAllocationPolicy();
-        };
+        if (type == SimProperties.PolicyType.MIDSEM) return new MidsemVmAllocationPolicy();
+        if (type == SimProperties.PolicyType.ARA) return new AraVmAllocationPolicy(props.getAra());
+        if (type == SimProperties.PolicyType.FIRST_FIT) return new FirstFitVmAllocationPolicy();
+        if (type == SimProperties.PolicyType.BEST_FIT) return new BestFitVmAllocationPolicy();
+        return new ZonedVmAllocationPolicy();
     }
 
     /** Which VMs move at runtime: spiky VMs between zones (ours), or ARA consolidation (base paper) */

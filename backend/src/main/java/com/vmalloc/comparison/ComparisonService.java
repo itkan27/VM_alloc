@@ -74,21 +74,24 @@ public class ComparisonService {
     /** Display name and one-line description of each policy */
     record PolicyInfo(String label, String description, boolean ours, boolean basePaper) {
 
-        static PolicyInfo of(PolicyType policy) {
-            return switch (policy) {
-                case ZONED -> new PolicyInfo("Ours: Eco/Performance zones",
+        // A map rather than an enum switch, which javac compiles into a synthetic
+        // ComparisonService$1 class that other compilers do not generate
+        private static final Map<PolicyType, PolicyInfo> INFO = Map.of(
+                PolicyType.ZONED, new PolicyInfo("Ours: Eco/Performance zones",
                         "All VMs start in the Eco Zone (one spiky VM per host); spiky VMs live-migrate to the "
-                        + "Performance Zone while they cross a CPU/RAM/MIPS threshold.", true, false);
-                case MIDSEM -> new PolicyInfo("Ours (midsem)",
-                        "One spiky VM per host, stable VMs best-fit; no zones, no migration.", true, false);
-                case ARA -> new PolicyInfo("Base paper: ARA",
+                        + "Performance Zone while they cross a CPU/RAM/MIPS threshold.", true, false),
+                PolicyType.MIDSEM, new PolicyInfo("Ours (midsem)",
+                        "One spiky VM per host, stable VMs best-fit; no zones, no migration.", true, false),
+                PolicyType.ARA, new PolicyInfo("Base paper: ARA",
                         "Adaptive Resource-Aware placement: multi-resource filter, score = α·CPU + β·RAM + "
-                        + "γ·energy efficiency − δ·migration cost, consolidation of underutilised hosts.", false, true);
-                case FIRST_FIT -> new PolicyInfo("First Fit",
-                        "First host with enough CPU, RAM and bandwidth.", false, false);
-                case BEST_FIT -> new PolicyInfo("Best Fit",
-                        "Host with the least CPU left that still fits.", false, false);
-            };
+                        + "γ·energy efficiency − δ·migration cost, consolidation of underutilised hosts.", false, true),
+                PolicyType.FIRST_FIT, new PolicyInfo("First Fit",
+                        "First host with enough CPU, RAM and bandwidth.", false, false),
+                PolicyType.BEST_FIT, new PolicyInfo("Best Fit",
+                        "Host with the least CPU left that still fits.", false, false));
+
+        static PolicyInfo of(PolicyType policy) {
+            return INFO.get(policy);
         }
     }
 }
