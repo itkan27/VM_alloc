@@ -57,6 +57,20 @@ public class CloudSimRunner {
     /** Live-run pacing: simulated seconds per wall second, and simulated seconds between VM arrivals */
     public record LiveOptions(double timeScale, double arrivalGapSeconds) {}
 
+    /** Policy and datacenter size for one run; defaults come from application.properties */
+    public record RunConfig(SimProperties.PolicyType policy, int hostCount, int performanceCount) {
+
+        public RunConfig {
+            hostCount = Math.max(1, hostCount);
+            performanceCount = Math.max(0, Math.min(performanceCount, hostCount));
+        }
+    }
+
+    /** The run configuration from application.properties */
+    public RunConfig defaultConfig() {
+        return new RunConfig(props.getPolicy(), props.getHost().getCount(), props.getHost().performanceCount());
+    }
+
     /** Everything one simulation run needs, built by {@link #prepare} */
     private record SimRun(
             CloudSimPlus simulation,
@@ -80,8 +94,19 @@ public class CloudSimRunner {
     public SimulationResult run(
             List<VmRequest> requests,
             Map<String, ClassificationResult> classifications) {
+        return run(requests, classifications, defaultConfig());
+    }
 
-        SimRun run = prepare(requests, classifications, 0.0);
+    /**
+     * Runs a batch simulation with an explicit policy and datacenter size (used by the
+     * policy comparison). Safe to call from several threads at once.
+     */
+    public SimulationResult run(
+            List<VmRequest> requests,
+            Map<String, ClassificationResult> classifications,
+            RunConfig config) {
+
+        SimRun run = prepare(requests, classifications, 0.0, config);
         run.simulation().start();
         log.info("Simulation finished. Clock: {} seconds, {} migrations.",
                 run.simulation().clock(), run.controller().getMigrations().size());
@@ -102,7 +127,7 @@ public class CloudSimRunner {
             SimulationObserver observer,
             BooleanSupplier stopRequested) {
 
-        SimRun run = prepare(requests, classifications, options.arrivalGapSeconds());
+        SimRun run = prepare(requests, classifications, options.arrivalGapSeconds(), defaultConfig());
         CloudSimPlus simulation = run.simulation();
         run.controller().setListener(observer);
 
@@ -168,18 +193,18 @@ public class CloudSimRunner {
     private SimRun prepare(
             List<VmRequest> requests,
             Map<String, ClassificationResult> classifications,
-            double arrivalGapSeconds) {
+            double arrivalGapSeconds,
+            RunConfig config) {
 
         log.info("Starting CloudSim Plus simulation: {} VMs, {} hosts ({} performance), policy={}.",
-                requests.size(), props.getHost().getCount(),
-                props.getHost().performanceCount(), props.getPolicy());
+                requests.size(), config.hostCount(), config.performanceCount(), config.policy());
 
         // ── 1. Bootstrap simulation ──────────────────────────────────────────
         var simulation = new CloudSimPlus();
 
         // ── 2. Build allocation policy & datacenter ──────────────────────────
-        TrackedAllocationPolicy policy = createPolicy();
-        List<Host> hosts = buildHosts(policy);
+        TrackedAllocationPolicy policy = createPolicy(config.policy());
+        List<Host> hosts = buildHosts(policy, config);
         var datacenter = new DatacenterSimple(simulation, hosts, policy);
         datacenter.setSchedulingInterval(1);
         datacenter.setBandwidthPercentForMigration(props.getMigration().getBandwidthPercent());
@@ -251,9 +276,7 @@ public class CloudSimRunner {
         }
 
         // ── 5. Spike simulation, migration and host monitoring ───────────────
-        ZonedVmAllocationPolicy migrationPolicy =
-                policy instanceof ZonedVmAllocationPolicy zoned && props.getMigration().isEnabled() ? zoned : null;
-        var controller = new SpikeMigrationController(policy, migrationPolicy, datacenter,
+        var controller = new SpikeMigrationController(policy, migrationStrategy(policy), datacenter,
                 new SpikeSchedule(props.getSpike()), props.getMigration(), vms);
         var monitor = new HostMonitor(hosts, policy.getLedger(), props.getHost().getIdlePolicy());
 
@@ -279,19 +302,33 @@ public class CloudSimRunner {
                 requests, classList, vms, profiles);
     }
 
-    private TrackedAllocationPolicy createPolicy() {
-        return switch (props.getPolicy()) {
+    private TrackedAllocationPolicy createPolicy(SimProperties.PolicyType type) {
+        return switch (type) {
             case ZONED -> new ZonedVmAllocationPolicy();
             case MIDSEM -> new MidsemVmAllocationPolicy();
+            case ARA -> new AraVmAllocationPolicy(props.getAra());
+            case FIRST_FIT -> new FirstFitVmAllocationPolicy();
+            case BEST_FIT -> new BestFitVmAllocationPolicy();
         };
     }
 
-    private List<Host> buildHosts(TrackedAllocationPolicy policy) {
+    /** Which VMs move at runtime: spiky VMs between zones (ours), or ARA consolidation (base paper) */
+    private MigrationStrategy migrationStrategy(TrackedAllocationPolicy policy) {
+        if (policy instanceof ZonedVmAllocationPolicy zoned && props.getMigration().isEnabled()) {
+            return new ZoneSpikeMigration(zoned, props.getMigration());
+        }
+        if (policy instanceof AraVmAllocationPolicy ara) {
+            return new AraConsolidation(ara, props.getAra());
+        }
+        return null;
+    }
+
+    private List<Host> buildHosts(TrackedAllocationPolicy policy, RunConfig config) {
         SimProperties.Hosts cfg = props.getHost();
-        int perfCount = cfg.performanceCount();
+        int perfCount = config.performanceCount();
 
         List<Host> hosts = new ArrayList<>();
-        for (int i = 0; i < cfg.getCount(); i++) {
+        for (int i = 0; i < config.hostCount(); i++) {
             boolean perf = i < perfCount;
             SimProperties.HostClass spec = perf ? cfg.getPerformance() : cfg.getEco();
 
@@ -416,6 +453,8 @@ public class CloudSimRunner {
         List<HostMetric> active = hostMetrics.stream().filter(HostMetric::active).toList();
         int spikyTotal = (int) profiles.stream().filter(VmProfile::isSpiky).count();
         int failed = (int) placements.stream().filter(p -> !p.allocationSuccess()).count();
+        int placedVms = requests.size() - failed;
+        int violated = monitor.slaViolatedVms();
 
         SimulationSummary summary = new SimulationSummary(
                 requests.size(),
@@ -428,9 +467,14 @@ public class CloudSimRunner {
                 migrations.size(),
                 run.controller().getSpikes(),
                 hostMetrics.stream().mapToDouble(HostMetric::overloadSeconds).sum(),
+                placedVms > 0 ? 100.0 * violated / placedVms : 0.0,
+                violated,
+                monitor.slaViolationVmSeconds(),
                 active.stream().mapToDouble(HostMetric::cpuUtilization).average().orElse(0.0),
                 active.stream().mapToDouble(HostMetric::activeSeconds).average().orElse(0.0),
-                monitor.totalEnergyKWh()
+                monitor.totalEnergyKWh(),
+                policy.avgPlacementTimeMs(),
+                policy.totalPlacementTimeMs()
         );
 
         return new SimulationResult(placements, hostMetrics, migrations, summary);

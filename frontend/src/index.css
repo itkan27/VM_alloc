@@ -558,3 +558,46 @@ tbody td {
 }
 
 .migration-log { max-height: 360px; overflow-y: auto; }
+
+/* ── Comparison tab ─────────────────────────────────────────── */
+.header-tabs { margin-left: auto; margin-right: 1.5rem; }
+
+.cmp-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.75rem; }
+
+.cmp-policy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+}
+
+.cmp-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+
+.cmp-badges { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 0.75rem; }
+.cmp-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+.cmp-badge-value { font-size: 1.35rem; font-weight: 800; font-family: 'Courier New', monospace; }
+.cmp-badge-label { font-size: 0.75rem; font-weight: 600; color: var(--text-primary); }
+.cmp-badge-sub { font-size: 0.68rem; color: var(--text-muted); }
+.cmp-badge-better { border-color: rgba(74,222,128,0.35); background: rgba(74,222,128,0.06); }
+.cmp-badge-better .cmp-badge-value { color: var(--accent-success); }
+.cmp-badge-worse { border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.06); }
+.cmp-badge-worse .cmp-badge-value { color: var(--accent-danger); }
+.cmp-badge-neutral .cmp-badge-value { color: var(--text-secondary); }
+
+.cmp-best { color: var(--accent-success); font-weight: 700; }
+
+.cmp-charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }

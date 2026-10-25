@@ -14,6 +14,7 @@
 | Batch simulation | `POST /api/simulation/run` returns placements, per-host metrics and a summary |
 | Live simulation | VMs arrive over time; placements, spikes and migrations stream to the dashboard over Server-Sent Events |
 | Dashboard | Live datacenter view with migration arrows, migration log, zone-coloured host charts, energy and migration cards, Instant / Live modes |
+| Comparison with base paper | Our zoned policy vs the base paper's ARA (Kumar et al., IMED 2026), First Fit, Best Fit and our midsem policy on the same workload; Comparison tab with % improvement, charts, the paper's Table II and CSV export |
 | Ablation policy | The midsem zone-unaware policy is kept (`sim.policy=MIDSEM`) for comparison |
 
 The roadmap for the remaining phases is in [`docs/FUTURE_WORK_PLAN.md`](docs/FUTURE_WORK_PLAN.md).
@@ -46,9 +47,11 @@ VM_alloc/
 │       ├── VmAllocApplication.java
 │       ├── config/CorsConfig.java
 │       ├── config/              (SimProperties ← sim.* keys, AsyncConfig, CorsConfig)
+│       ├── comparison/          (ComparisonService, WorkloadGenerator, base paper Table II)
 │       ├── controller/
 │       │   ├── VmController.java              ← batch API
-│       │   └── LiveSimulationController.java  ← live sessions + SSE stream
+│       │   ├── LiveSimulationController.java  ← live sessions + SSE stream
+│       │   └── ComparisonController.java      ← policy comparison
 │       ├── live/                (session registry, event replay, LiveSimulationService)
 │       ├── model/               (VmRequest, Zone, SimulationResult, live events, …)
 │       ├── service/
@@ -59,8 +62,12 @@ VM_alloc/
 │           ├── TrackedAllocationPolicy.java     ← shared ledger + zones; books only confirmed placements
 │           ├── ZonedVmAllocationPolicy.java     ← Eco-only initial placement + migration targets
 │           ├── MidsemVmAllocationPolicy.java    ← midsem policy (ablation baseline)
+│           ├── AraVmAllocationPolicy.java       ← base paper ARA scoring placement
+│           ├── AraConsolidation.java            ← base paper ARA consolidation + EWMA prediction
+│           ├── FirstFit/BestFitVmAllocationPolicy.java ← base paper baselines
 │           ├── SpikeSchedule.java               ← simulated VM load (odd / even spike windows)
-│           ├── SpikeMigrationController.java    ← thresholds → live migrations between zones
+│           ├── SpikeMigrationController.java    ← spike simulation + executes live migrations
+│           ├── ZoneSpikeMigration.java          ← our thresholds → Eco ⇄ Performance migrations
 │           ├── HostLedger.java                  ← per-host CPU (avg + current) / RAM / BW bookkeeping
 │           └── HostMonitor.java                 ← energy, utilisation, overload time per host
 │
@@ -85,7 +92,8 @@ VM_alloc/
             ├── MetricsSummary.jsx
             ├── LiveStatus.jsx
             ├── DatacenterView.jsx         ← hosts per zone, VM chips, migration arrows
-            └── MigrationLog.jsx
+            ├── MigrationLog.jsx
+            └── ComparisonPanel.jsx        ← Comparison tab
 ```
 
 ## Running All Three Services
@@ -179,6 +187,40 @@ The midsem rule (no zones, no migration) remains available as `sim.policy=MIDSEM
 `timeScale` is simulated seconds per real second (5 makes each 5 s spike visible for about a second).
 Events carry ids, so a reconnecting client (`Last-Event-ID`) only receives what it missed.
 
+## Comparison with the Base Paper
+
+Base paper: *An Adaptive Resource-Aware Virtual Machine Placement for Energy-Efficient Cloud
+Computing Environments* (Kumar, Jain & Pareek, IMED 2026). Its ARA algorithm (Algorithm 1) is
+implemented as `sim.policy=ARA`:
+
+* **Filter** hosts whose current free CPU, RAM, storage and bandwidth cover the VM's predicted demand.
+* **Score** `α·Available_CPU + β·Available_RAM + γ·Energy_Efficiency − δ·Migration_Cost`
+  (each term 0–1; energy efficiency = MIPS per watt after placement, migration cost = memory copy
+  time) and place on the highest score.
+* **Predict** each VM's demand with an exponentially weighted moving average of its observed load.
+* **Consolidate** every 30 s: VMs on hosts below 20% CPU are migrated onto busier active hosts and
+  the emptied hosts power down.
+
+`POST /api/comparison/run` runs the selected policies (default: all five) on one workload, each
+in its own simulation with identical VMs, datacenter and simulated spikes. With no `vms` in the
+body a seeded workload is generated; defaults follow the paper's scale (200 VMs, 50 hosts).
+
+| Metric | Definition |
+|---|---|
+| Hosts Used | Hosts that ran at least one VM |
+| Avg CPU Utilisation | Time-averaged CPU utilisation of active hosts |
+| SLA Violation Rate | % of placed VMs that ran on an overloaded host (demand > capacity) at some point |
+| Energy | Σ P(u)·Δt over hosts, idle hosts powered off |
+| VM Migrations | Completed live migrations |
+| Placement Time | Mean wall-clock time per host-selection decision |
+| Failed Allocations | VMs no host could take |
+| Host Overload Time | Σ seconds hosts spent overloaded |
+
+The **Comparison** tab shows these side by side, the % improvement of our zoned policy over a
+chosen baseline (ARA by default), one chart per metric, the paper's published Table II for
+reference (different set-up: PlanetLab traces, 24 h), and a CSV export. PSO from the paper is not
+implemented.
+
 ## Configuration
 
 All keys live in `backend/src/main/resources/application.properties`.
@@ -186,7 +228,7 @@ All keys live in `backend/src/main/resources/application.properties`.
 | Property | Default | Meaning |
 |---|---|---|
 | `ml.service.url` | `http://localhost:8000` | ML service URL |
-| `sim.policy` | `ZONED` | `ZONED` or `MIDSEM` |
+| `sim.policy` | `ZONED` | `ZONED`, `MIDSEM`, `ARA`, `FIRST_FIT` or `BEST_FIT` |
 | `sim.host.count` | `10` | Total hosts (both zones) |
 | `sim.host.performance.count` | `3` | Performance Zone hosts |
 | `sim.host.performance.pes` / `.mips` / `.ram` / `.bandwidth` | `4` / `5000` / `65536` / `40000` | Per-host PEs, MIPS per PE, RAM (MB), bandwidth (Mbps) |
@@ -203,3 +245,8 @@ All keys live in `backend/src/main/resources/application.properties`.
 | `sim.migration.ramThresholdPercent` | `85` | VM RAM usage % that triggers migration (0 = off) |
 | `sim.migration.mipsThreshold` | `3000` | VM demand in MIPS that triggers migration (0 = off) |
 | `sim.migration.bandwidthPercent` | `1.0` | Share of target host bandwidth used to copy VM memory |
+| `sim.ara.alpha` / `beta` / `gamma` / `delta` | `0.4` / `0.3` / `0.3` / `0.2` | ARA score weights |
+| `sim.ara.underutilizedThresholdPercent` | `20` | ARA consolidates hosts below this CPU % |
+| `sim.ara.consolidationIntervalSeconds` | `30` | How often ARA consolidates |
+| `sim.ara.predictionSmoothing` | `0.5` | EWMA weight of the newest load sample |
+| `sim.ara.migrationCostNormSeconds` | `10` | Migration time that counts as maximum cost |

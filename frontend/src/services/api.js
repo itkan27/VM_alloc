@@ -32,6 +32,13 @@ export const stopLiveSimulation = (sessionId) =>
 export const sessionStreamUrl = (sessionId) => `${API_BASE}/simulation/sessions/${sessionId}/stream`;
 
 /**
+ * Compare placement policies (ours vs the base paper's ARA and its baselines) on one workload.
+ * @param {object} request - ComparisonRequest (all fields optional)
+ * @returns {Promise} ComparisonResult
+ */
+export const runComparison = (request) => API.post('/comparison/run', request).then((r) => r.data);
+
+/**
  * Ping the Java backend to verify it is reachable.
  */
 export const pingBackend = () => API.get('/simulation/ping').then((r) => r.data);

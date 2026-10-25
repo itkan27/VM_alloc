@@ -83,6 +83,12 @@ public class HostLedger {
         return Math.min(currentLoad(host), 1.0);
     }
 
+    /** RAM booked on the host (MB) */
+    public long ramUsed(Host host) {
+        Usage u = usage.get(host.getId());
+        return u == null ? 0 : u.ram;
+    }
+
     public int vms(Host host) {
         Usage u = usage.get(host.getId());
         return u == null ? 0 : u.vms.size();

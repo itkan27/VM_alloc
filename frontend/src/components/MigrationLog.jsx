@@ -43,6 +43,8 @@ export default function MigrationLog({ migrations }) {
               <td title={m.detail} style={{ fontSize: '0.78rem' }}>
                 {m.trigger === 'SPIKE' ? (
                   <span style={{ color: 'var(--accent-spiky)' }}>⚡ {m.detail}</span>
+                ) : m.trigger === 'CONSOLIDATION' ? (
+                  <span style={{ color: 'var(--accent-primary)' }}>⇣ consolidation: {m.detail}</span>
                 ) : (
                   <span style={{ color: 'var(--accent-success)' }}>↓ spike ended</span>
                 )}
