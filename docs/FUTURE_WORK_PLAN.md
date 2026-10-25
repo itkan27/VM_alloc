@@ -15,7 +15,7 @@
 | 1 — Performance & Eco zones | ✅ Done, **redesigned**: zones are decoupled. Every VM starts in the Eco Zone (one spiky VM per host, stable best-fit); the Performance Zone starts empty |
 | 2 — Real-time dashboard | ✅ Done. Live sessions on a background executor, SSE stream with replay (`Last-Event-ID`), Instant / Live modes |
 | 3 — Live placement & migration | ✅ Done. Simulated spikes (odd VMs after 15 s for 5 s, even VMs after 20 s for 5 s, repeating); CPU / RAM / MIPS thresholds trigger CloudSim live migration Eco → Performance and back; live datacenter view with migration arrows and migration log |
-| 4 — Comparison with base paper | ✅ Implemented (not yet tested). ARA from the base paper (scoring placement, EWMA prediction, consolidation), First Fit and Best Fit; `POST /api/comparison/run`; Comparison tab with % improvement, per-metric charts, paper Table II and CSV export. PSO not implemented |
+| 4 — Comparison with base paper | ⏳ Next |
 | Testing & validation | Deferred to the end. All tests are tagged `validation` and excluded from `mvn test` |
 
 The design actually implemented replaces §4.3 and §6.3 below: placement is Eco-only, and

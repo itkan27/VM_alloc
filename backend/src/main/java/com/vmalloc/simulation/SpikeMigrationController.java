@@ -3,6 +3,7 @@ package com.vmalloc.simulation;
 import com.vmalloc.config.SimProperties;
 import com.vmalloc.model.MigrationEvent;
 import com.vmalloc.model.SpikeEvent;
+import com.vmalloc.model.Zone;
 import com.vmalloc.simulation.SpikeSchedule.VmLoad;
 import org.cloudsimplus.datacenters.Datacenter;
 import org.cloudsimplus.hosts.Host;
@@ -13,18 +14,18 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 
 /**
- * Drives the spike simulation and executes live migrations.
+ * Drives the spike simulation and the live migrations between zones.
  *
- * Every clock tick:
- *   1. compute each running VM's load from the {@link SpikeSchedule} and record it in the ledger
+ * Every clock tick, for each running VM:
+ *   1. compute its load from the {@link SpikeSchedule} and record it in the ledger
  *   2. report spike start / end
- *   3. let the policy's {@link MigrationStrategy} (if any) request migrations:
- *        ZONED → {@link ZoneSpikeMigration}  (spiky VMs Eco ⇄ Performance on thresholds)
- *        ARA   → {@link AraConsolidation}    (empty underutilised hosts, base paper)
+ *   3. for a SPIKY VM (ZONED policy only):
+ *        ANY threshold crossed while on an Eco host  → migrate to a Performance host
+ *        ALL thresholds below while on a Performance host → migrate back to Eco
  *
  * Migrations use CloudSim's live migration (memory copied over the target host's
- * bandwidth). A VM is not migrated again while a migration of it is in flight, and
- * the target's CPU is reserved until the migration completes.
+ * bandwidth). A VM is not re-evaluated while a migration of it is in flight, and the
+ * target's capacity is reserved until the migration completes.
  */
 public class SpikeMigrationController {
 
@@ -32,7 +33,6 @@ public class SpikeMigrationController {
 
     public static final String TRIGGER_SPIKE = "SPIKE";
     public static final String TRIGGER_SPIKE_ENDED = "SPIKE_ENDED";
-    public static final String TRIGGER_CONSOLIDATION = "CONSOLIDATION";
 
     /** Receives spike and migration events (called on the simulation thread) */
     public interface Listener {
@@ -46,14 +46,12 @@ public class SpikeMigrationController {
         void onMigration(MigrationEvent event);
     }
 
-    /** A VM executing its cloudlet during the current tick, with its load right now */
-    public record RunningVm(Vm vm, VmProfile profile, VmLoad load, TrackedAllocationPolicy.Placement placement) {}
-
     private record InFlight(Host from, Host to, String trigger, String detail,
                             VmLoad load, double requestedAt, double reservedMips) {}
 
     private final TrackedAllocationPolicy policy;
-    private final MigrationStrategy strategy;
+    /** Null when migration is off: spikes are still simulated, VMs just stay put */
+    private final ZonedVmAllocationPolicy migrationPolicy;
     private final Datacenter datacenter;
     private final SpikeSchedule schedule;
     private final SimProperties.Migration thresholds;
@@ -63,24 +61,18 @@ public class SpikeMigrationController {
     private final Map<Vm, Boolean> spiking = new IdentityHashMap<>();
     private final Map<Vm, InFlight> inFlight = new IdentityHashMap<>();
     private final Map<Vm, Integer> migrationCounts = new IdentityHashMap<>();
+    private final Set<Vm> noTargetReported = Collections.newSetFromMap(new IdentityHashMap<>());
     private final List<MigrationEvent> migrations = new ArrayList<>();
-    private List<RunningVm> running = List.of();
-    private double now;
     private int spikes;
 
-    /**
-     * @param strategy   null when the policy never migrates: spikes are still simulated,
-     *                   VMs just stay where they were placed
-     * @param thresholds used to flag spikes that cross a migration threshold
-     */
     public SpikeMigrationController(TrackedAllocationPolicy policy,
-                                    MigrationStrategy strategy,
+                                    ZonedVmAllocationPolicy migrationPolicy,
                                     Datacenter datacenter,
                                     SpikeSchedule schedule,
                                     SimProperties.Migration thresholds,
                                     List<? extends Vm> vms) {
         this.policy = policy;
-        this.strategy = strategy;
+        this.migrationPolicy = migrationPolicy;
         this.datacenter = datacenter;
         this.schedule = schedule;
         this.thresholds = thresholds;
@@ -93,10 +85,7 @@ public class SpikeMigrationController {
     }
 
     public void onTick(double now) {
-        this.now = now;
         HostLedger ledger = policy.getLedger();
-        List<RunningVm> current = new ArrayList<>();
-
         for (Vm vm : vms) {
             Optional<TrackedAllocationPolicy.Placement> placement = policy.placementOf(vm);
             if (placement.isEmpty() || !isRunning(vm)) continue;
@@ -104,63 +93,52 @@ public class SpikeMigrationController {
             VmProfile profile = policy.profileOf(vm);
             VmLoad load = schedule.loadAt(profile, now - placement.get().placedAt());
             ledger.setCurrentDemand(profile, load.demandMips());
-            current.add(new RunningVm(vm, profile, load, placement.get()));
+            String crossed = crossedThresholds(load);
 
             if (load.spiking() != spiking.getOrDefault(vm, false)) {
                 spiking.put(vm, load.spiking());
                 if (load.spiking()) spikes++;
                 Host host = vm.getHost();
                 listener.onSpike(new SpikeEvent(profile.vmId(), vm.getId(), load.spiking(),
-                        load.cpuPercent(), load.ramPercent(), load.demandMips(),
-                        profile.isSpiky() && ZoneSpikeMigration.crossedThresholds(thresholds, load) != null,
+                        load.cpuPercent(), load.ramPercent(), load.demandMips(), crossed != null,
                         host.getId(), policy.zoneOf(host), now));
             }
+
+            if (migrationPolicy != null && profile.isSpiky() && !inFlight.containsKey(vm)) {
+                maybeMigrate(vm, profile, load, crossed, placement.get().host(), now);
+            }
         }
-        running = current;
-
-        if (strategy != null) strategy.onTick(now, this);
     }
 
-    // ─── API for migration strategies ────────────────────────────────────────
+    private void maybeMigrate(Vm vm, VmProfile profile, VmLoad load, String crossed, Host home, double now) {
+        Host current = vm.getHost();
+        Zone zone = policy.zoneOf(current);
 
-    public List<RunningVm> runningVms() {
-        return running;
+        if (crossed != null && zone == Zone.ECO) {
+            Optional<Host> target = migrationPolicy.findPerformanceHost(vm, profile, load.demandMips(), reservedMips());
+            if (target.isPresent()) {
+                start(vm, current, target.get(), TRIGGER_SPIKE, crossed, load, now, load.demandMips());
+            } else if (noTargetReported.add(vm)) {
+                log.warn("{} crossed a threshold ({}) but no Performance host has room; it stays on Host-{}.",
+                        profile.vmId(), crossed, current.getId());
+            }
+        } else if (crossed == null && zone == Zone.PERFORMANCE) {
+            migrationPolicy.findEcoHost(vm, profile, home, reservedMips())
+                    .ifPresent(target -> start(vm, current, target, TRIGGER_SPIKE_ENDED,
+                            "all thresholds below", load, now, profile.avgDemandMips()));
+        }
     }
 
-    public boolean isInFlight(Vm vm) {
-        return inFlight.containsKey(vm);
-    }
-
-    /** Hosts receiving at least one in-flight migration */
-    public Set<Host> migrationTargets() {
-        Set<Host> targets = Collections.newSetFromMap(new IdentityHashMap<>());
-        inFlight.values().forEach(f -> targets.add(f.to()));
-        return targets;
-    }
-
-    /** CPU (MIPS) promised to in-flight migrations, per target host */
-    public Map<Host, Double> reservedMips() {
-        Map<Host, Double> reserved = new IdentityHashMap<>();
-        inFlight.values().forEach(f -> reserved.merge(f.to(), f.reservedMips(), Double::sum));
-        return reserved;
-    }
-
-    /**
-     * Starts a live migration of a running VM.
-     *
-     * @param reservedMips CPU to hold on the target until the migration completes
-     */
-    public void migrate(RunningVm vm, Host to, String trigger, String detail, double reservedMips) {
-        Host from = vm.vm().getHost();
-        inFlight.put(vm.vm(), new InFlight(from, to, trigger, detail, vm.load(), now, reservedMips));
-        log.debug("{}: migrating {} Host-{} ({}) -> Host-{} ({}) [{}]", trigger, vm.profile().vmId(),
+    private void start(Vm vm, Host from, Host to, String trigger, String detail,
+                       VmLoad load, double now, double reservedMips) {
+        inFlight.put(vm, new InFlight(from, to, trigger, detail, load, now, reservedMips));
+        noTargetReported.remove(vm);
+        log.debug("{}: migrating {} Host-{} ({}) -> Host-{} ({}) [{}]", trigger, vm.getDescription(),
                 from.getId(), policy.zoneOf(from), to.getId(), policy.zoneOf(to), detail);
-        datacenter.requestVmMigration(vm.vm(), to);
+        datacenter.requestVmMigration(vm, to);
     }
 
-    // ─── Bookkeeping ─────────────────────────────────────────────────────────
-
-    private void onMigrationFinished(Vm vm, Host target, double time) {
+    private void onMigrationFinished(Vm vm, Host target, double now) {
         InFlight f = inFlight.remove(vm);
         if (f == null) return;
         migrationCounts.merge(vm, 1, Integer::sum);
@@ -170,9 +148,27 @@ public class SpikeMigrationController {
                 target.getId(), "Host-" + target.getId(), policy.zoneOf(target),
                 f.trigger(), f.detail(),
                 f.load().cpuPercent(), f.load().ramPercent(), f.load().demandMips(),
-                f.requestedAt(), time);
+                f.requestedAt(), now);
         migrations.add(event);
         listener.onMigration(event);
+    }
+
+    /** Human-readable list of crossed thresholds, or null when none is crossed */
+    private String crossedThresholds(VmLoad load) {
+        List<String> crossed = new ArrayList<>();
+        if (thresholds.getCpuThresholdPercent() > 0 && load.cpuPercent() > thresholds.getCpuThresholdPercent())
+            crossed.add("CPU %.0f%% > %.0f%%".formatted(load.cpuPercent(), thresholds.getCpuThresholdPercent()));
+        if (thresholds.getRamThresholdPercent() > 0 && load.ramPercent() > thresholds.getRamThresholdPercent())
+            crossed.add("RAM %.0f%% > %.0f%%".formatted(load.ramPercent(), thresholds.getRamThresholdPercent()));
+        if (thresholds.getMipsThreshold() > 0 && load.demandMips() > thresholds.getMipsThreshold())
+            crossed.add("MIPS %.0f > %.0f".formatted(load.demandMips(), thresholds.getMipsThreshold()));
+        return crossed.isEmpty() ? null : String.join(", ", crossed);
+    }
+
+    private Map<Host, Double> reservedMips() {
+        Map<Host, Double> reserved = new IdentityHashMap<>();
+        inFlight.values().forEach(f -> reserved.merge(f.to(), f.reservedMips(), Double::sum));
+        return reserved;
     }
 
     /** Created, on a host and still executing its cloudlet */

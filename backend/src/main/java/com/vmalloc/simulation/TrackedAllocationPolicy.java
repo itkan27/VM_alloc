@@ -47,8 +47,6 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
     private final Map<Vm, Host> bookedHosts = new IdentityHashMap<>();
     private final Map<Vm, Placement> placements = new IdentityHashMap<>();
     private PlacementListener placementListener = PlacementListener.NOOP;
-    private long placementNanos;
-    private int placementDecisions;
 
     // ─── Registration API (called by CloudSimRunner before simulation.start()) ──
 
@@ -73,10 +71,7 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
     @Override
     public Optional<Host> defaultFindHostForVm(final Vm vm) {
         VmProfile profile = profileOf(vm);
-        long start = System.nanoTime();
         Optional<Selection> selection = selectHost(profile, vm);
-        placementNanos += System.nanoTime() - start;
-        placementDecisions++;
 
         selection.ifPresentOrElse(
                 s -> pendingReasons.put(vm, s.reason()),
@@ -125,16 +120,6 @@ public abstract class TrackedAllocationPolicy extends VmAllocationPolicyAbstract
 
     public Zone zoneOf(Host host) {
         return zones.getOrDefault(host, Zone.ECO);
-    }
-
-    /** Wall-clock time spent choosing hosts for VMs (ms), including broker retries */
-    public double totalPlacementTimeMs() {
-        return placementNanos / 1e6;
-    }
-
-    /** Mean wall-clock time per host-selection decision (ms) */
-    public double avgPlacementTimeMs() {
-        return placementDecisions == 0 ? 0.0 : totalPlacementTimeMs() / placementDecisions;
     }
 
     public Optional<Placement> placementOf(Vm vm) {

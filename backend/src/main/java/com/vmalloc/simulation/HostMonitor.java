@@ -11,8 +11,6 @@ import java.util.*;
  *   active time   seconds the host had at least one VM
  *   utilisation   time-averaged while active, plus the highest load seen
  *   overload      seconds the host's demand exceeded its capacity
- *   SLA           per VM, seconds it ran on an overloaded host (it could not get its
- *                 demanded CPU); a VM with any such time counts as an SLA violation
  *
  * Call {@link #integrate(double)} at each clock tick before VM loads change, then
  * {@link #sample()} after, so every interval is charged at the state it actually had.
@@ -32,7 +30,6 @@ public class HostMonitor {
         final Set<VmProfile> seenVms = Collections.newSetFromMap(new IdentityHashMap<>());
 
         // State since the last sample
-        Collection<VmProfile> vmsNow = List.of();
         boolean hasVms;
         double load;
         double watts;
@@ -42,7 +39,6 @@ public class HostMonitor {
     private final HostLedger ledger;
     private final IdlePolicy idlePolicy;
     private final Map<Host, Stats> stats = new IdentityHashMap<>();
-    private final Map<VmProfile, Double> slaViolationSeconds = new IdentityHashMap<>();
     private double lastTime = 0.0;
 
     public HostMonitor(List<Host> hosts, HostLedger ledger, IdlePolicy idlePolicy) {
@@ -61,10 +57,7 @@ public class HostMonitor {
             if (s.hasVms) {
                 s.activeSeconds += dt;
                 s.utilizationSeconds += Math.min(s.load, 1.0) * dt;
-                if (s.load > 1.0 + EPSILON) {
-                    s.overloadSeconds += dt;
-                    for (VmProfile vm : s.vmsNow) slaViolationSeconds.merge(vm, dt, Double::sum);
-                }
+                if (s.load > 1.0 + EPSILON) s.overloadSeconds += dt;
             }
         }
         lastTime = now;
@@ -74,14 +67,13 @@ public class HostMonitor {
     public void sample() {
         for (Host h : hosts) {
             Stats s = stats.get(h);
-            s.vmsNow = ledger.vmsOn(h);
-            s.hasVms = !s.vmsNow.isEmpty();
+            s.hasVms = ledger.vms(h) > 0;
             s.load = ledger.currentLoad(h);
             boolean poweredOn = s.hasVms || idlePolicy == IdlePolicy.KEEP_IDLE;
             s.watts = poweredOn ? h.getPowerModel().getPower(Math.min(s.load, 1.0)) : 0.0;
             if (s.hasVms) {
                 s.maxLoad = Math.max(s.maxLoad, s.load);
-                s.seenVms.addAll(s.vmsNow);
+                s.seenVms.addAll(ledger.vmsOn(h));
             }
         }
     }
@@ -110,16 +102,6 @@ public class HostMonitor {
 
     public double overloadSeconds(Host h) {
         return stats.get(h).overloadSeconds;
-    }
-
-    /** VMs that spent time on an overloaded host */
-    public int slaViolatedVms() {
-        return slaViolationSeconds.size();
-    }
-
-    /** Σ over VMs of seconds spent on an overloaded host */
-    public double slaViolationVmSeconds() {
-        return slaViolationSeconds.values().stream().mapToDouble(Double::doubleValue).sum();
     }
 
     /** Distinct VMs that ran on the host */

@@ -16,14 +16,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "sim")
 public class SimProperties {
 
-    /**
-     * ZONED     — ours: Eco-only placement + spike-driven migration to the Performance Zone
-     * MIDSEM    — ours (midsem): one spiky VM per host, no zones, no migration
-     * ARA       — base paper: Adaptive Resource-Aware placement + consolidation (Kumar et al.)
-     * FIRST_FIT — baseline from the base paper
-     * BEST_FIT  — baseline from the base paper
-     */
-    public enum PolicyType { ZONED, MIDSEM, ARA, FIRST_FIT, BEST_FIT }
+    public enum PolicyType { ZONED, MIDSEM }
 
     /** POWER_OFF: hosts without VMs draw no power. KEEP_IDLE: every host draws at least idle power. */
     public enum IdlePolicy { POWER_OFF, KEEP_IDLE }
@@ -32,14 +25,12 @@ public class SimProperties {
     private final Hosts host = new Hosts();
     private final Spike spike = new Spike();
     private final Migration migration = new Migration();
-    private final Ara ara = new Ara();
 
     public PolicyType getPolicy() { return policy; }
     public void setPolicy(PolicyType policy) { this.policy = policy; }
     public Hosts getHost() { return host; }
     public Spike getSpike() { return spike; }
     public Migration getMigration() { return migration; }
-    public Ara getAra() { return ara; }
 
     // ── sim.host.* ───────────────────────────────────────────────────────────
 
@@ -185,46 +176,5 @@ public class SimProperties {
         public void setMipsThreshold(double mipsThreshold) { this.mipsThreshold = mipsThreshold; }
         public double getBandwidthPercent() { return bandwidthPercent; }
         public void setBandwidthPercent(double bandwidthPercent) { this.bandwidthPercent = bandwidthPercent; }
-    }
-
-    // ── sim.ara.* ────────────────────────────────────────────────────────────
-
-    /**
-     * Base-paper ARA policy (Adaptive Resource-Aware VM Placement, Algorithm 1).
-     *
-     *   Score = α·Available_CPU + β·Available_RAM + γ·Energy_Efficiency − δ·Migration_Cost
-     *
-     * Every {@code consolidationIntervalSeconds}, VMs on hosts below
-     * {@code underutilizedThresholdPercent} CPU are migrated onto busier active hosts so
-     * the emptied hosts power down. VM demand is predicted with an exponentially
-     * weighted moving average ({@code predictionSmoothing} = weight of the newest sample).
-     */
-    public static class Ara {
-        private double alpha = 0.4;
-        private double beta = 0.3;
-        private double gamma = 0.3;
-        private double delta = 0.2;
-        private double underutilizedThresholdPercent = 20;
-        private double consolidationIntervalSeconds = 30;
-        private double predictionSmoothing = 0.5;
-        /** Migration time (s) that counts as the maximum migration cost of 1.0 */
-        private double migrationCostNormSeconds = 10;
-
-        public double getAlpha() { return alpha; }
-        public void setAlpha(double alpha) { this.alpha = alpha; }
-        public double getBeta() { return beta; }
-        public void setBeta(double beta) { this.beta = beta; }
-        public double getGamma() { return gamma; }
-        public void setGamma(double gamma) { this.gamma = gamma; }
-        public double getDelta() { return delta; }
-        public void setDelta(double delta) { this.delta = delta; }
-        public double getUnderutilizedThresholdPercent() { return underutilizedThresholdPercent; }
-        public void setUnderutilizedThresholdPercent(double v) { this.underutilizedThresholdPercent = v; }
-        public double getConsolidationIntervalSeconds() { return consolidationIntervalSeconds; }
-        public void setConsolidationIntervalSeconds(double v) { this.consolidationIntervalSeconds = v; }
-        public double getPredictionSmoothing() { return predictionSmoothing; }
-        public void setPredictionSmoothing(double v) { this.predictionSmoothing = v; }
-        public double getMigrationCostNormSeconds() { return migrationCostNormSeconds; }
-        public void setMigrationCostNormSeconds(double v) { this.migrationCostNormSeconds = v; }
     }
 }

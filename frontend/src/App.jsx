@@ -7,7 +7,6 @@ import MetricsSummary from './components/MetricsSummary';
 import LiveStatus from './components/LiveStatus';
 import DatacenterView from './components/DatacenterView';
 import MigrationLog from './components/MigrationLog';
-import ComparisonPanel from './components/ComparisonPanel';
 import useSimulationStream from './hooks/useSimulationStream';
 import { runSimulation, startLiveSimulation, stopLiveSimulation, pingBackend } from './services/api';
 
@@ -18,8 +17,6 @@ export default function App() {
   const [backendOnline, setBackendOnline] = useState(null); // null = unknown
   const [sessionId, setSessionId] = useState(null);
   const [stopping, setStopping] = useState(false);
-  const [tab, setTab] = useState('simulation'); // simulation | comparison
-  const [lastVms, setLastVms] = useState(null);
 
   const stream = useSimulationStream(sessionId);
   const liveRunning = sessionId && (stream.status === 'connecting' || stream.status === 'running');
@@ -48,7 +45,6 @@ export default function App() {
     setError(null);
     setResult(null);
     setSessionId(null);
-    setLastVms(vms);
     try {
       if (mode === 'live') {
         setSessionId(await startLiveSimulation(vms, { timeScale, arrivalGapSeconds }));
@@ -91,15 +87,6 @@ export default function App() {
           <span className="header-title">VM Placement Dashboard</span>
         </div>
 
-        <nav className="mode-toggle header-tabs" aria-label="Dashboard sections">
-          <button type="button" className={tab === 'simulation' ? 'active' : ''} onClick={() => setTab('simulation')} id="tab-simulation">
-            Simulation
-          </button>
-          <button type="button" className={tab === 'comparison' ? 'active' : ''} onClick={() => setTab('comparison')} id="tab-comparison">
-            Comparison
-          </button>
-        </nav>
-
         <div className="header-status">
           <span
             className={`status-dot ${backendOnline === false ? 'offline' : ''}`}
@@ -114,10 +101,6 @@ export default function App() {
 
       {/* ── Main ───────────────────────────────────────────────── */}
       <main className="app-main">
-        {tab === 'comparison' && <ComparisonPanel lastVms={lastVms} />}
-
-        {/* Kept mounted while hidden so the VM batch and a live session survive tab switches */}
-        <div style={{ display: tab === 'simulation' ? 'block' : 'none' }}>
 
         {/* ── Submission form ─────────────────────────────── */}
         <div className="card mb-6">
@@ -210,7 +193,6 @@ export default function App() {
             </div>
           </div>
         )}
-        </div>
       </main>
     </div>
   );
