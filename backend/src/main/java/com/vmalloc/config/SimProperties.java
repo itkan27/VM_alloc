@@ -118,8 +118,8 @@ public class SimProperties {
      */
     public static class Spike {
         private boolean repeat = true;
-        private final SpikeWindow odd = new SpikeWindow(15, 5);
-        private final SpikeWindow even = new SpikeWindow(20, 5);
+        private final SpikeWindow odd = new SpikeWindow(50, 100);
+        private final SpikeWindow even = new SpikeWindow(50, 100);
         private double ramBaselinePercent = 50;
         private double ramSpikePercent = 90;
 

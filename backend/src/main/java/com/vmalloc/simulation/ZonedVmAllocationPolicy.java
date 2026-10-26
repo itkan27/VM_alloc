@@ -5,6 +5,7 @@ import org.cloudsimplus.hosts.Host;
 import org.cloudsimplus.vms.Vm;
 
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -18,8 +19,9 @@ import java.util.Optional;
  *   STABLE → Best-Fit on an Eco host (least remaining headroom) for maximum consolidation
  *
  * Live migration targets (chosen for {@link SpikeMigrationController}):
- *   to Performance → first Performance host whose CURRENT load + the VM's current
- *                    demand fits, so a spiking VM gets its full peak
+ *   to Performance → an empty Performance host first; once all usable hosts are
+ *                    occupied, the first Performance host whose CURRENT load +
+ *                    the VM's current demand fits
  *   back to Eco    → the VM's original host if it still qualifies, else the first Eco
  *                    host with no spiky VM and average-demand room
  */
@@ -41,17 +43,26 @@ public class ZonedVmAllocationPolicy extends TrackedAllocationPolicy {
     }
 
     /**
-     * Performance host for a spiking VM.
+     * Performance host for a spiking VM — empty-host-first first-fit.
      *
-     * @param demandMips   the VM's current demand
-     * @param reservedMips MIPS already promised to migrations still in flight, per host
+     * A spike gets an unused Performance host when one is available. This keeps
+     * concurrent spikes isolated across hosts. If every suitable Performance
+     * host already has a VM, the first suitable host is reused.
+     *
+     * @param demandMips   the VM's current (peak) demand during the spike
+     * @param reservedMips MIPS already promised to in-flight migrations, per host
      */
     public Optional<Host> findPerformanceHost(Vm vm, VmProfile profile, double demandMips,
                                               Map<Host, Double> reservedMips) {
-        return candidates(profile, vm, Zone.PERFORMANCE)
+        List<Host> suitableHosts = candidates(profile, vm, Zone.PERFORMANCE)
                 .filter(h -> HostLedger.fitsCpu(h,
                         ledger.currentMips(h) + reservedMips.getOrDefault(h, 0.0), demandMips))
-                .findFirst();
+                .toList();
+        return suitableHosts.stream()
+                .filter(h -> ledger.vms(h) == 0
+                        && reservedMips.getOrDefault(h, 0.0) == 0.0)
+                .findFirst()
+                .or(() -> suitableHosts.stream().findFirst());
     }
 
     /**
